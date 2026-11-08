@@ -1,4 +1,5 @@
 #include <libultraship.h>
+#include "port/Rollback.h"
 #include <libultra/message.h>
 #include <macros.h>
 
@@ -278,6 +279,9 @@ void port_eu_init_queues(void) {
 }
 
 void func_800CBB48(s32 arg0, s32* arg1) {
+    if (gRollbackResim) {
+        return; /* rollback re-simulation: no audio commands */
+    }
     struct EuAudioCmd* cmd = &sAudioCmd[D_800EA3A0[0] & 0xff];
     cmd->u.first = arg0;
     cmd->u2.as_u32 = *arg1;

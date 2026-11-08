@@ -402,6 +402,9 @@ void read_controllers(void) {
     ReplayCheck_OverrideInput();
     KartNet_OverrideInput();
     Rollback_SyncTestRecordInput();
+    if (gKartNetHoldFrame) {
+        return; /* netplay time sync: no game tick this frame */
+    }
     update_all_controllers();
 }
 
@@ -741,7 +744,7 @@ void race_logic_loop(void) {
         replays_loop();
     }
 
-    if (gIsGamePaused == false) {
+    if (gIsGamePaused == false && !gKartNetHoldFrame) {
         for (size_t i = 0; i < (size_t) gTickLogic; i++) {
             process_game_tick();
         }

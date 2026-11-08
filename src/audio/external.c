@@ -1,4 +1,5 @@
 #include <libultraship.h>
+#include "port/Rollback.h"
 #include <common_structs.h>
 #include <macros.h>
 #include <mk64.h>
@@ -944,6 +945,9 @@ void func_800C2A2C(u32 cmd) {
 }
 
 void func_800C3448(u32 arg0) {
+    if (gRollbackResim) {
+        return; /* re-simulated frames already sent their audio commands */
+    }
     D_80192CD0[D_800EA1E4] = arg0;
     D_800EA1E4 += 1;
 }
@@ -1275,6 +1279,9 @@ void func_800C40F0(u8 arg0) {
 }
 
 void play_sound(u32 soundBits, Vec3f* position, u8 cameraId, f32* arg3, f32* arg4, s8* arg5) {
+    if (gRollbackResim) {
+        return; /* rollback re-simulation: these sounds already played */
+    }
     u8 bank;
     struct Sound* temp_v0;
 

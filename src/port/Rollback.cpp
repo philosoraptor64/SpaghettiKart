@@ -319,6 +319,41 @@ void Rollback_PrepareWorld(void) {
     SimHeap_Leave();
 }
 
+/* ---- Snapshot slots for the netplay rollback driver ---- */
+static std::vector<Snapshot> sSlots;
+static double sSlotSaveMs = 0, sSlotLoadMs = 0;
+static unsigned long sSlotSaves = 0, sSlotLoads = 0;
+
+int Rollback_InitSlots(int count) {
+    if (!Rollback_Supported()) {
+        return 0;
+    }
+    sSlots.resize((size_t) count);
+    return 1;
+}
+
+void Rollback_SaveSlot(int slot) {
+    double t0 = NowMs();
+    Save(sSlots[(size_t) slot % sSlots.size()]);
+    sSlotSaveMs += NowMs() - t0;
+    sSlotSaves++;
+}
+
+void Rollback_LoadSlot(int slot) {
+    double t0 = NowMs();
+    const Snapshot& s = sSlots[(size_t) slot % sSlots.size()];
+    if (s.valid) {
+        Load(s);
+    }
+    sSlotLoadMs += NowMs() - t0;
+    sSlotLoads++;
+}
+
+void Rollback_SlotStats(double* avgSaveMs, double* avgLoadMs) {
+    *avgSaveMs = sSlotSaves ? sSlotSaveMs / (double) sSlotSaves : 0;
+    *avgLoadMs = sSlotLoads ? sSlotLoadMs / (double) sSlotLoads : 0;
+}
+
 int Rollback_Supported(void) {
     FindSections();
     return sSupported;

@@ -1301,7 +1301,7 @@ void func_8005A070(void) {
     gMatrixHudCount = 0;
     D_801655C0 = 0;
     func_80041D34();
-    if (gIsGamePaused == false && (Editor_IsPaused() == false)) {
+    if (gIsGamePaused == false && (Editor_IsPaused() == false) && !gKartNetHoldFrame) {
         func_8005C728();
         if (gGamestate == ENDING) {
             // func_80086604();

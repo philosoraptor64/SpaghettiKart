@@ -32,6 +32,8 @@
 #include "port/Game.h"
 #include "menu_items.h"
 #include "port/Rollback.h"
+#include "port/SimHeap.h"
+#include "n64net_input.h"
 #include <SDL2/SDL.h>
 #if defined(__APPLE__)
 #include <mach-o/getsect.h>
@@ -125,6 +127,25 @@ static int sWantDelay = 2, sPeerWantDelay = 0, sCurDelay = 2;
 static double sLowSince = 0;
 static long sLastScheduled = -1; /* highest tick holding a local input */
 static double sRttMaxWindow = 0;
+
+/* Rollback (MK64_NET_ROLLBACK=1): inputs travel through n64net_input
+ * (prediction, misprediction -> rollback, time sync, sync check); KartNet keeps
+ * the handshake. Race setup isn't rollback-safe (setup objects are created in
+ * the first frames), so the first MK64_NET_ROLLBACK_FROM ticks run in lockstep. */
+#define RB_SLOTS 16
+#define RB_HASHES 64
+static int sRollback = 0;
+static uint32_t sRbWindow = 8;
+static long sRbFrom = 60;
+static n64net_input* sNet = NULL;
+static unsigned long sSimTick = 0;
+static unsigned long sSlotTick[RB_SLOTS];
+static unsigned long long sTickHash[RB_HASHES];
+static long sTickHashTick[RB_HASHES];
+static long sLastRecorded = -1;
+static unsigned long sRbCount = 0, sRbFrames = 0, sRbMaxDepth = 0, sHolds = 0;
+static int sDesyncLogged = 0;
+int gKartNetHoldFrame = 0; /* time sync: this displayed frame runs no game logic */
 
 /* Simulated bad network for tests (outgoing packets of this side):
  * MK64_NET_SIM_LATENCY / _JITTER (ms), _LOSS (%), _SPIKE (ms extra for
@@ -632,6 +653,9 @@ static void Poll(void) {
                    (from.sin_addr.s_addr != sPeer.sin_addr.s_addr || from.sin_port != sPeer.sin_port)) {
             continue;
         }
+        if (sNet && n64net_input_handle_packet(sNet, buf, (uint32_t) n)) {
+            continue;
+        }
         HandlePacket(buf, (size_t) n, &from);
     }
 }
@@ -678,6 +702,12 @@ static void Init(void) {
         const char* view = getenv("MK64_NET_VIEW");
         sFullView = !(view && strcmp(view, "split") == 0);
         sSingleView = !(view && strcmp(view, "double") == 0);
+    }
+    sRollback = EnvInt("MK64_NET_ROLLBACK", 0) != 0 && Rollback_Supported();
+    sRbWindow = (uint32_t) EnvInt("MK64_NET_ROLLBACK_WINDOW", 8);
+    sRbFrom = EnvInt("MK64_NET_ROLLBACK_FROM", 60);
+    if (sRollback && !SimHeap_Enable()) {
+        sRollback = 0;
     }
     sAdaptive = EnvInt("MK64_NET_ADAPTIVE", 1) != 0;
     sMaxDelay = (int) EnvInt("MK64_NET_MAX_DELAY", 6);
@@ -746,6 +776,9 @@ void KartNet_SetPaused(int paused) {
     if (sState == NET_HANDSHAKE || sState == NET_RUNNING) {
         Log("local app %s", paused ? "paused (background)" : "resumed");
         SendPause(paused);
+        if (sNet) {
+            n64net_input_set_away(sNet, paused);
+        }
         if (!paused && sState == NET_RUNNING && sRaceRequested) {
             /* Come back to the game's own pause menu (in sync on both sides,
              * since the press travels as a normal input) instead of straight
@@ -956,6 +989,156 @@ static void ScheduleLocal(const NetPad* local, int delay) {
     }
 }
 
+static unsigned long long StateHash(void);
+
+static void NetSendCb(void* user, const uint8_t* data, uint32_t size) {
+    (void) user;
+    SendRaw(data, size);
+}
+
+static void NetLogCb(const char* fmt, ...) {
+    char buf[400];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    Log("n64net: %s", buf);
+}
+
+static void ApplyNetPads(unsigned long tick) {
+    memset(gControllerPads, 0, sizeof(OSContPad) * 4);
+    for (int p = 0; p < 2; p++) {
+        n64net_pad pad;
+        n64net_input_get(sNet, p, (uint32_t) tick, &pad);
+        gControllerPads[p].button = pad.buttons;
+        gControllerPads[p].stick_x = pad.stick_x;
+        gControllerPads[p].stick_y = pad.stick_y;
+    }
+}
+
+static void RecordTickHash(unsigned long tick) {
+    sTickHash[tick % RB_HASHES] = StateHash();
+    sTickHashTick[tick % RB_HASHES] = (long) tick;
+}
+
+static void RbSave(void* user, uint32_t slot) {
+    (void) user;
+    Rollback_SaveSlot((int) slot);
+    sSlotTick[slot % RB_SLOTS] = sSimTick;
+}
+
+static void RbLoad(void* user, uint32_t slot) {
+    (void) user;
+    Rollback_LoadSlot((int) slot);
+    sSimTick = sSlotTick[slot % RB_SLOTS];
+}
+
+/* One game tick from the ledger's inputs, without drawing or sound. */
+static void RbAdvance(void* user) {
+    (void) user;
+    ApplyNetPads(sSimTick);
+    gRollbackResim = 1;
+    rollback_sim_frame();
+    gRollbackResim = 0;
+    RecordTickHash(sSimTick);
+    sSimTick++;
+}
+
+/* Hashes of states whose inputs are all confirmed go to the peer. */
+static void RecordConfirmedHashes(void) {
+    uint32_t c = n64net_input_confirmed_tick(sNet);
+    if (c == UINT32_MAX) {
+        return;
+    }
+    for (long t = sLastRecorded + 1; t <= (long) c && t <= (long) sTick; t++) {
+        const int slot = (int) (t % RB_HASHES);
+        if (t % HASH_EVERY == 0 && sTickHashTick[slot] == t) {
+            unsigned long long h = sTickHash[slot];
+            n64net_sync_record(sNet, (uint32_t) t, 0, (uint32_t) (h ^ (h >> 32)));
+        }
+        sLastRecorded = t;
+    }
+    uint32_t dt;
+    uint8_t kind;
+    if (!sDesyncLogged && n64net_sync_desynced(sNet, &dt, &kind)) {
+        sDesyncLogged = 1;
+        Log("DESYNC tick %u (rollback mode)", dt);
+    }
+}
+
+/* The rollback path of KartNet_OverrideInput: local input for this tick, wait
+ * until the peer is close enough, roll back if a prediction was wrong, then
+ * apply this tick's inputs (predicted for the peer if not here yet). */
+static void RollbackFrame(const NetPad* local) {
+    if (!sNet) {
+        n64net_input_config c;
+        memset(&c, 0, sizeof(c));
+        c.num_players = 2;
+        c.local_player = sLocalPlayer;
+        c.session_id = (uint32_t) sSeed ^ 0x4D4B3634u;
+        c.start_tick = 0;
+        c.input_delay = (uint32_t) sDelay;
+        c.rollback_window = 0; /* lockstep until sRbFrom */
+        c.ticks_per_second = 30;
+        c.send = NetSendCb;
+        c.log = NetLogCb;
+        sNet = n64net_input_create(&c);
+        Rollback_InitSlots(RB_SLOTS);
+        for (int i = 0; i < RB_HASHES; i++) {
+            sTickHashTick[i] = -1;
+        }
+        Log("rollback on: window %u from tick %ld, delay %d", sRbWindow, sRbFrom, sDelay);
+    }
+    if ((long) sTick == sRbFrom) {
+        n64net_input_set_window(sNet, sRbWindow);
+    }
+    if ((long) sTick > sRbFrom && n64net_timesync_should_skip(sNet)) {
+        gKartNetHoldFrame = 1; /* we're ahead: show this frame again, let the peer catch up */
+        sHolds++;
+        return;
+    }
+    n64net_pad lp = { local->button, local->x, local->y };
+    n64net_input_set_local(sNet, (uint32_t) sTick, lp);
+
+    if (!n64net_input_ready(sNet, (uint32_t) sTick)) {
+        double start = NowMs(), lastPump = start;
+        sStalls++;
+        while (!n64net_input_ready(sNet, (uint32_t) sTick)) {
+            usleep(500);
+            Poll();
+            n64net_input_resend(sNet);
+            double now = NowMs();
+            if (now - lastPump > 50) {
+                lastPump = now;
+                SDL_PumpEvents();
+            }
+            double silentMs = n64net_input_peer_silence_usecs(sNet) / 1000.0;
+            int away = n64net_input_peer_away(sNet) || sPeerPaused;
+            if (silentMs > (away ? PAUSED_TIMEOUT_MS : WAIT_TIMEOUT_MS) ||
+                (silentMs == 0 && now - start > WAIT_TIMEOUT_MS)) {
+                Log("peer silent at tick %lu; netplay stopped", sTick);
+                sState = NET_DONE;
+                return;
+            }
+        }
+        sStallMs += NowMs() - start;
+    }
+
+    sSimTick = sTick;
+    n64net_rollback_callbacks cb = { RbSave, RbLoad, RbAdvance, NULL, RB_SLOTS };
+    int depth = n64net_rollback_frame(sNet, (uint32_t) sTick, &cb);
+    if (depth > 0) {
+        sRbCount++;
+        sRbFrames += (unsigned long) depth;
+        if ((unsigned long) depth > sRbMaxDepth) {
+            sRbMaxDepth = (unsigned long) depth;
+        }
+    } else if (depth < 0) {
+        Log("rollback deeper than the snapshot ring at tick %lu", sTick);
+    }
+    ApplyNetPads(sTick);
+}
+
 void KartNet_OverrideInput(void) {
     if (!sInitDone) {
         Init();
@@ -1001,6 +1184,10 @@ void KartNet_OverrideInput(void) {
             local.button = (u16) ((local.button & ~(L_TRIG | R_TRIG)) | START_BUTTON);
             Log("opening the pause menu after returning from the background");
         }
+    }
+    if (sRollback) {
+        RollbackFrame(&local);
+        return;
     }
     ScheduleLocal(&local, delay);
     long top = sLastScheduled;
@@ -1085,6 +1272,14 @@ void KartNet_UpdateShellVisibility(void) {
         }
         a->flags = flags;
     }
+}
+
+static unsigned long long StateHash(void) {
+    unsigned long long h = 1469598103934665603ull;
+    h = HashPlayers(h);
+    h = Fnv1a(h, &gRandomSeed16, sizeof(gRandomSeed16));
+    h = Fnv1a(h, &gGamestate, sizeof(gGamestate));
+    return h;
 }
 
 /* Zero the Player fields that only drawing writes (a copy of gPlayers). */
@@ -1175,7 +1370,25 @@ void KartNet_EndFrame(void) {
     if (sState != NET_RUNNING || !sRaceRequested) {
         return;
     }
-    if (sTick % HASH_EVERY == 0) {
+    if (gKartNetHoldFrame) {
+        gKartNetHoldFrame = 0; /* no game tick ran this frame */
+        return;
+    }
+    if (sRollback && sNet) {
+        RecordTickHash(sTick);
+        RecordConfirmedHashes();
+        if (sTick % (HASH_EVERY * 10) == 0 && sTick > 0) {
+            n64net_input_stats st;
+            n64net_input_get_stats(sNet, &st);
+            double sv, ld;
+            Rollback_SlotStats(&sv, &ld);
+            Log("sync tick %lu %s (matched %u, rollbacks %lu / %lu frames, max %lu, holds %lu, stalls %lu / %.0f ms, "
+                "rtt %u/%u ms, save %.2f ms load %.2f ms)",
+                sTick, sDesyncLogged ? "DESYNCED" : "OK", n64net_sync_matched(sNet), sRbCount, sRbFrames, sRbMaxDepth,
+                sHolds, sStalls, sStallMs, st.rtt_avg_usecs / 1000, st.rtt_max_usecs / 1000, sv, ld);
+        }
+    }
+    if (!sRollback && sTick % HASH_EVERY == 0) {
         unsigned long long h = 1469598103934665603ull;
         h = HashPlayers(h);
         h = Fnv1a(h, &gRandomSeed16, sizeof(gRandomSeed16));
@@ -1206,8 +1419,16 @@ void KartNet_EndFrame(void) {
         double end = NowMs() + 1500;
         while (NowMs() < end) {
             Poll();
-            SendInputs(sLastScheduled);
+            if (sNet) {
+                n64net_input_resend(sNet);
+            } else {
+                SendInputs(sLastScheduled);
+            }
             usleep(16000);
+        }
+        if (sNet) {
+            sSyncOk = n64net_sync_matched(sNet);
+            sSyncBad = sDesyncLogged ? 1 : 0;
         }
         Log("done after %lu frames: %lu checkpoints in sync, %lu desynced, %lu stalls (%.0f ms)", sTick, sSyncOk,
             sSyncBad, sStalls, sStallMs);

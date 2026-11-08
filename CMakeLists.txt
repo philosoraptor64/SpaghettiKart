@@ -139,6 +139,13 @@ target_include_directories(
                           ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(${PROJECT_NAME} PRIVATE YAML_CPP_STATIC_DEFINE)
 
+# n64net (github.com/philosoraptor64/n64net): netplay input exchange with
+# prediction/rollback, time sync and sync checks (used by KartNet's rollback
+# mode). Voice chat not wired up yet.
+set(N64NET_VOICE OFF CACHE BOOL "" FORCE)
+add_subdirectory(n64net)
+target_link_libraries(${PROJECT_NAME} PRIVATE n64net)
+
 # Rollback snapshots: put the game's mutable C globals in the __MKSNAP segment
 # (src/port/SnapshotSection.h). -fno-common turns tentative definitions into
 # real ones so the section pragma applies to them. Netplay transport, the
