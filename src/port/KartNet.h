@@ -20,6 +20,10 @@ extern "C" {
  *   MK64_NET_HOST=1         this side hosts (player 1); otherwise guest (player 2)
  *   MK64_NET_BIND=ip:port   local UDP address (default 0.0.0.0:7101 host, :0 guest)
  *   MK64_NET_PEER=ip:port   the host's address (guest only)
+ *   MK64_NET_SERVER=host:port  n64net room server: find the peer by room code
+ *                           (then BIND/PEER are optional); MK64_NET_ROOM=ABCD,
+ *                           MK64_NET_PASSWORD, MK64_NET_RELAY=1, MK64_NET_WAIT_SECS
+ *   MK64_NET_ROLLBACK=1     rollback netcode (n64net_input); _WINDOW=8, _FROM=60
  *   MK64_NET_DELAY=2        minimum input delay in frames (host decides)
  *   MK64_NET_ADAPTIVE=1     raise the delay while the network is slow (0 = fixed)
  *   MK64_NET_MAX_DELAY=6    upper limit for the adaptive delay

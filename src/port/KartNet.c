@@ -34,6 +34,8 @@
 #include "port/Rollback.h"
 #include "port/SimHeap.h"
 #include "n64net_input.h"
+#include "n64net_rendezvous.h"
+#include "kartnet_build_id.h"
 #include <SDL2/SDL.h>
 #if defined(__APPLE__)
 #include <mach-o/getsect.h>
@@ -663,6 +665,11 @@ static void Poll(void) {
 /* ------------------------------------------------------------------------ */
 /* Setup                                                                     */
 
+static void NetLogCb(const char* fmt, ...);
+static void PumpWhileWaiting(void) {
+    SDL_PumpEvents(); /* keep the window and the iOS life cycle responsive */
+}
+
 static void Init(void) {
     sInitDone = 1;
 #if defined(PLATFORM_IOS)
@@ -754,7 +761,37 @@ static void Init(void) {
         sSock = -1;
         return;
     }
-    if (!sIsHost) {
+    const char* server = getenv("MK64_NET_SERVER");
+    if (server && *server) {
+        /* Room code: find the other player through the n64net rendezvous
+         * server, on this same socket (the NAT mapping it opens is the one
+         * the race uses). Blocks until the other player is there. */
+        N64NetRendezvousConfig rc;
+        N64NetRendezvousResult rr;
+        memset(&rc, 0, sizeof(rc));
+        memset(&rr, 0, sizeof(rr));
+        rc.server = server;
+        rc.game = "mk64-us+" KARTNET_BUILD_ID;
+        rc.room = getenv("MK64_NET_ROOM");
+        rc.password = getenv("MK64_NET_PASSWORD");
+        rc.is_host = sIsHost;
+        rc.force_relay = EnvInt("MK64_NET_RELAY", 0) != 0;
+        rc.wait_secs = (int) EnvInt("MK64_NET_WAIT_SECS", 600);
+        rc.log = NetLogCb;
+        rc.yield = PumpWhileWaiting;
+        Log("%s room %s on %s (game %s)", sIsHost ? "hosting" : "joining", (rc.room && *rc.room) ? rc.room : "(random)",
+            server, rc.game);
+        if (n64net_rendezvous_connect(sSock, &rc, &rr) != 0) {
+            Log("room code failed: %s", rr.error);
+            close(sSock);
+            sSock = -1;
+            sState = NET_DONE;
+            return;
+        }
+        sPeer = rr.peer;
+        sHavePeer = 1;
+        Log("room %s: connected to %s%s", rr.room, AddrStr(&rr.peer), rr.relayed ? " (relayed by the server)" : "");
+    } else if (!sIsHost) {
         const char* peer = getenv("MK64_NET_PEER");
         if (!peer || !ParseAddr(peer, &sPeer)) {
             Log("guest needs MK64_NET_PEER=host:port");

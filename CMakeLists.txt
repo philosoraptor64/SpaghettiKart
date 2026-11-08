@@ -145,6 +145,11 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE YAML_CPP_STATIC_DEFINE)
 set(N64NET_VOICE OFF CACHE BOOL "" FORCE)
 add_subdirectory(n64net)
 target_link_libraries(${PROJECT_NAME} PRIVATE n64net)
+# Netplay build id: the room server pairs only equal simulation code.
+n64net_add_build_id(${PROJECT_NAME}
+  HEADER ${CMAKE_BINARY_DIR}/generated/kartnet_build_id.h
+  MACRO KARTNET_BUILD_ID
+  ENTRIES "${CMAKE_SOURCE_DIR}::src")
 
 # Rollback snapshots: put the game's mutable C globals in the __MKSNAP segment
 # (src/port/SnapshotSection.h). -fno-common turns tentative definitions into
