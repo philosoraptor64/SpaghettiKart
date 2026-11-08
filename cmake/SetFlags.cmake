@@ -1,5 +1,14 @@
+# Netplay needs every build (macOS, iOS, Windows, Linux) to compute the same
+# physics bit-for-bit. Fast-math lets each compiler reorder/fuse float ops
+# differently, so it is off unless explicitly requested.
+option(SPAGHETTI_STRICT_FP "Deterministic floating point (needed for netplay)" ON)
+
 if(MSVC)
-  target_compile_options(${PROJECT_NAME} PRIVATE /fp:fast)
+  if(SPAGHETTI_STRICT_FP)
+    target_compile_options(${PROJECT_NAME} PRIVATE /fp:precise) # VS2022+: no FMA contraction under /fp:precise
+  else()
+    target_compile_options(${PROJECT_NAME} PRIVATE /fp:fast)
+  endif()
 
   if("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "x64")
     target_compile_options(${PROJECT_NAME} PRIVATE
@@ -36,7 +45,7 @@ else()
     -Wno-missing-field-initializers
     -Wno-parentheses
     -Wno-missing-braces
-    -ffast-math
+    $<IF:$<BOOL:${SPAGHETTI_STRICT_FP}>,-ffp-contract=off,-ffast-math>
     -flto=auto
     -pipe)
   target_link_options(${PROJECT_NAME} PRIVATE -flto=auto)
