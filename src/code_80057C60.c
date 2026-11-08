@@ -650,6 +650,61 @@ void func_80058C20(u32 arg0) {
     }
 }
 
+/* Netplay full view (KartNet): the race runs as a 2-player split-screen race,
+ * but each device shows only its own player, full screen. Draw that player's
+ * HUD at the 1-player positions: shift the 2-player positions (which keep
+ * their own slide animations) for the duration of the draw. */
+static const s16 sNetHud2pTimerX[2] = { 0x4B, 0xDC };
+static const s16 sNetHud2pLapX[2] = { 0x67, 0xF7 };
+static const s16 sNetHud2pRankX[2] = { 0x32, 0xC8 };
+static hud_player sNetHudSaved;
+
+static void netplay_hud_push(s32 playerId) {
+    hud_player* h = &playerHUD[playerId];
+    s32 i;
+    s16 dx;
+    sNetHudSaved = *h;
+    dx = 0xE4 - sNetHud2pTimerX[playerId];
+    h->timerX += dx;
+    for (i = 0; i < 3; i++) {
+        h->lapCompletionTimeXs[i] += dx;
+    }
+    h->totalTimeX += dx;
+    h->timerY += 0x11 - 0x10;
+    h->lapX += 0x53 - sNetHud2pLapX[playerId];
+    h->lapY += 0x19 - 0x28;
+    h->itemBoxX = 0xA0;
+    h->itemBoxY = 0x20;
+    h->rankX += 52 - sNetHud2pRankX[playerId];
+    h->rankY += 0xC8 - 0xD2;
+}
+
+static void netplay_hud_pop(s32 playerId) {
+    hud_player* h = &playerHUD[playerId];
+    h->timerX = sNetHudSaved.timerX;
+    memcpy(h->lapCompletionTimeXs, sNetHudSaved.lapCompletionTimeXs, sizeof(h->lapCompletionTimeXs));
+    h->totalTimeX = sNetHudSaved.totalTimeX;
+    h->timerY = sNetHudSaved.timerY;
+    h->lapX = sNetHudSaved.lapX;
+    h->lapY = sNetHudSaved.lapY;
+    h->itemBoxX = sNetHudSaved.itemBoxX;
+    h->itemBoxY = sNetHudSaved.itemBoxY;
+    h->rankX = sNetHudSaved.rankX;
+    h->rankY = sNetHudSaved.rankY;
+}
+
+static void render_hud_netplay_local(s32 playerId) {
+    if (gHUDDisable != 0) {
+        return;
+    }
+    FrameInterpolation_RecordOpenChild("HudMatrix", 0);
+    set_matrix_hud_screen();
+    netplay_hud_push(playerId);
+    draw_simplified_hud(playerId);
+    netplay_hud_pop(playerId);
+    FrameInterpolation_RecordCloseChild();
+}
+
 void render_hud(u32 arg0) {
 
     D_8018D21C = arg0;
@@ -674,6 +729,10 @@ void render_hud(u32 arg0) {
 
                 break;
             case RENDER_SCREEN_MODE_2P_VERTICAL_PLAYER_ONE:
+                if (!gDemoMode && KartNet_WantsLocalView()) {
+                    render_hud_netplay_local(KartNet_LocalPlayer());
+                    break;
+                }
                 if (!gDemoMode) {
                     render_hud_2p_vertical_player_one();
                     break;
@@ -681,6 +740,10 @@ void render_hud(u32 arg0) {
 
                 break;
             case RENDER_SCREEN_MODE_2P_VERTICAL_PLAYER_TWO:
+                if (!gDemoMode && KartNet_WantsLocalView()) {
+                    render_hud_netplay_local(KartNet_LocalPlayer());
+                    break;
+                }
                 if (!gDemoMode) {
                     render_hud_2p_vertical_player_two();
                     break;
@@ -788,7 +851,10 @@ void func_800590D4(void) {
                     break;
                 case 2:
                     if (KartNet_WantsLocalView()) {
-                        func_8004E800(KartNet_LocalPlayer()); // netplay full view: own place only
+                        // netplay full view: own place only, at the 1-player position
+                        netplay_hud_push(KartNet_LocalPlayer());
+                        func_8004E800(KartNet_LocalPlayer());
+                        netplay_hud_pop(KartNet_LocalPlayer());
                         break;
                     }
                     func_8004E800(PLAYER_ONE);

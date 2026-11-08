@@ -8,6 +8,8 @@
 #   HOST_BOT/GUEST_BOT=seed   bot on one side only
 #   DELAY=n      input delay in frames (default 2)
 #   MODE=gp|vs   Grand Prix with CPUs (default) or Versus
+#   VIEW=full|split|single (HOST_VIEW/GUEST_VIEW per side), DRIFT=1 bots also drift
+#   HOST_REPLAY/GUEST_REPLAY=file  drive that side from a ReplayCheck input recording
 #   CUP, COURSE, CC, HOST_CHAR, GUEST_CHAR, SEED
 set -u
 SK="$(cd "$(dirname "$0")/../.." && pwd)"; ROOT="${KARTNET_LOGS_ROOT:-$SK/..}"
@@ -34,6 +36,11 @@ host_env=("${common[@]}" MK64_NET_HOST=1 MK64_NET_BIND=127.0.0.1:7101 MK64_NET_D
 guest_env=("${common[@]}" MK64_NET_BIND=127.0.0.1:7102 MK64_NET_PEER=127.0.0.1:7101 MK64_NET_LOG="$LOGS/guest.log")
 [ -n "${GUEST_CHAR:-}" ] && guest_env+=(MK64_NET_CHAR="$GUEST_CHAR")
 [ -n "${GUEST_BOT:-}" ] && guest_env+=(MK64_NET_BOT="$GUEST_BOT")
+[ -n "${HOST_VIEW:-${VIEW:-}}" ] && host_env+=(MK64_NET_VIEW="${HOST_VIEW:-$VIEW}")
+[ -n "${GUEST_VIEW:-${VIEW:-}}" ] && guest_env+=(MK64_NET_VIEW="${GUEST_VIEW:-$VIEW}")
+[ -n "${HOST_REPLAY:-}" ] && host_env+=(MK64_NET_REPLAY="$HOST_REPLAY")
+[ -n "${GUEST_REPLAY:-}" ] && guest_env+=(MK64_NET_REPLAY="$GUEST_REPLAY")
+[ -n "${DRIFT:-}" ] && host_env+=(MK64_NET_BOT_DRIFT=1) && guest_env+=(MK64_NET_BOT_DRIFT=1)
 if [ -n "${DUMP:-}" ]; then host_env+=(MK64_NET_DUMP="$LOGS/host-dump.bin"); guest_env+=(MK64_NET_DUMP="$LOGS/guest-dump.bin"); fi
 
 echo "Logs: $LOGS"

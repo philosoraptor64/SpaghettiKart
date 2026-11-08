@@ -765,6 +765,9 @@ void race_logic_loop(void) {
             }
             break;
         case SCREEN_MODE_2P_SPLITSCREEN_VERTICAL:
+            if (KartNet_SkipSplitRender()) {
+                break;
+            }
             if (gPlayerWinningIndex == 0) {
                 render_screens(gScreenTwoCtx, RENDER_SCREEN_MODE_2P_VERTICAL_PLAYER_TWO, 2, 1);
                 render_screens(gScreenOneCtx, RENDER_SCREEN_MODE_2P_VERTICAL_PLAYER_ONE, 1, 0);

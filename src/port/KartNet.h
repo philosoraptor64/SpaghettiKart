@@ -45,6 +45,7 @@ void KartNet_SetPaused(int paused);
 int KartNet_WantsLocalView(void);
 int KartNet_LocalPlayer(void); /* 0 host, 1 guest */
 void KartNet_RenderLocalView(void* splitStart); /* a Gfx* */
+int KartNet_SkipSplitRender(void); /* MK64_NET_VIEW=single experiment */
 
 #ifdef __cplusplus
 }

@@ -23,6 +23,7 @@
 #include "code_80057C60.h"
 #include "racing/skybox_and_splitscreen.h"
 #include "port/RaceStart.h"
+#include "spawn_players.h"
 #include <SDL2/SDL.h>
 
 extern OSContPad gControllerPads[4];
@@ -59,7 +60,9 @@ static unsigned long sBootFrames = 0;
 static int sRaceRequested = 0;
 static unsigned long sTick = 0;      /* netplay frame, 0 = the race-request frame */
 static unsigned long sMaxTicks = 0;  /* 0 = unlimited */
+static void LoadReplay(const char* path);
 static int sBot = 0;
+static int sBotDrift = 0; /* MK64_NET_BOT_DRIFT=1: the bot also drifts */
 static unsigned int sBotState = 1;
 static int sBotSteer = 0, sBotTarget = 0;
 
@@ -83,6 +86,9 @@ static double sStallMs = 0;
 static double sLastHelloMs = 0;
 static int sPeerPaused = 0;
 static int sFullView = 1; /* MK64_NET_VIEW=full (default) or split */
+/* Full view: draw only the local screen (default). MK64_NET_VIEW=double draws
+ * both split screens first and undoes the extra draw (the first version). */
+static int sSingleView = 1;
 static int sInjectStart = 0; /* press Start once after returning from the background */
 static FILE* sDump = NULL; /* MK64_NET_DUMP: raw gPlayers at each checkpoint */
 
@@ -510,8 +516,11 @@ static void Init(void) {
     {
         const char* view = getenv("MK64_NET_VIEW");
         sFullView = !(view && strcmp(view, "split") == 0);
+        sSingleView = !(view && strcmp(view, "double") == 0);
     }
     sBot = (int) EnvInt("MK64_NET_BOT", 0);
+    sBotDrift = (int) EnvInt("MK64_NET_BOT_DRIFT", 0);
+    LoadReplay(getenv("MK64_NET_REPLAY"));
     sBotState = (unsigned int) sBot * 2654435761u + 1;
 
     for (int pl = 0; pl < 2; pl++) {
@@ -637,6 +646,40 @@ void KartNet_BeginFrame(void) {
     }
 }
 
+/* MK64_NET_REPLAY=path: drive the local player from a ReplayCheck recording
+ * (lines "frame buttons(hex) x y"), e.g. a human race, for realistic tests. */
+static NetPad* sReplay = NULL;
+static unsigned long sReplayLen = 0;
+static void LoadReplay(const char* path) {
+    FILE* in = path ? fopen(path, "r") : NULL;
+    if (!in) {
+        return;
+    }
+    unsigned long cap = 8192, f;
+    unsigned int b;
+    int x, y;
+    char line[128];
+    sReplay = (NetPad*) calloc(cap, sizeof(NetPad));
+    while (fgets(line, sizeof(line), in)) {
+        if (sscanf(line, "%lu %x %d %d", &f, &b, &x, &y) != 4) {
+            continue;
+        }
+        while (f >= cap) {
+            sReplay = (NetPad*) realloc(sReplay, cap * 2 * sizeof(NetPad));
+            memset(sReplay + cap, 0, cap * sizeof(NetPad));
+            cap *= 2;
+        }
+        sReplay[f].button = (u16) b;
+        sReplay[f].x = (s8) x;
+        sReplay[f].y = (s8) y;
+        if (f + 1 > sReplayLen) {
+            sReplayLen = f + 1;
+        }
+    }
+    fclose(in);
+    Log("# local input: replay %s (%lu frames)", path, sReplayLen);
+}
+
 static NetPad BotInput(unsigned long f) {
     NetPad pad = { 0, 0, 0 };
     if (f % 20 == 0) {
@@ -651,6 +694,13 @@ static NetPad BotInput(unsigned long f) {
     pad.button = A_BUTTON;
     if (f % 150 == 75) {
         pad.button |= Z_TRIG;
+    }
+    if (sBotDrift && f % 240 >= 120 && f % 240 < 200) {
+        /* hop and hold R through a hard turn: drift (sparks) */
+        pad.button |= R_TRIG;
+        int dir = (f / 240) % 2 ? 1 : -1;
+        pad.x = (s8) (dir * (((f / 8) % 2) ? 80 : 20)); /* wiggle: mini-turbo sparks */
+        return pad;
     }
     pad.x = (s8) sBotSteer;
     return pad;
@@ -680,7 +730,10 @@ void KartNet_OverrideInput(void) {
         }
     }
     NetPad local;
-    if (sBot) {
+    if (sReplay) {
+        NetPad none = { 0, 0, 0 };
+        local = (sTick < sReplayLen) ? sReplay[sTick] : none;
+    } else if (sBot) {
         local = BotInput(sTick);
     } else {
         local.button = live.button;
@@ -739,13 +792,35 @@ void KartNet_OverrideInput(void) {
     }
 }
 
+/* Hash the simulation part of gPlayers. Drawing a screen writes per-screen
+ * fields (visibility, sprite angle and frame, drift-spark particles); each
+ * device draws only its own screen, so those fields differ by design. Tested:
+ * with one side drawing both screens and the other only its own, every other
+ * field stayed identical over 3000 frames of drifting and items. */
+static Player sHashCopy[NUM_PLAYERS];
+static unsigned long long HashPlayers(unsigned long long h) {
+    memcpy(sHashCopy, gPlayers, sizeof(sHashCopy));
+    for (int i = 0; i < NUM_PLAYERS; i++) {
+        Player* p = &sHashCopy[i];
+        p->unk_002 = 0;
+        memset(p->unk_048, 0, sizeof(p->unk_048));
+        memset(p->unk_050, 0, sizeof(p->unk_050));
+        memset(p->unk_0CC, 0, sizeof(p->unk_0CC));
+        memset(p->unk_0D4, 0, sizeof(p->unk_0D4));
+        memset(p->animFrameSelector, 0, sizeof(p->animFrameSelector));
+        memset(p->animGroupSelector, 0, sizeof(p->animGroupSelector));
+        memset(p->particlePool3, 0, sizeof(p->particlePool3));
+    }
+    return Fnv1a(h, sHashCopy, sizeof(sHashCopy));
+}
+
 void KartNet_EndFrame(void) {
     if (sState != NET_RUNNING || !sRaceRequested) {
         return;
     }
     if (sTick % HASH_EVERY == 0) {
         unsigned long long h = 1469598103934665603ull;
-        h = Fnv1a(h, gPlayers, sizeof(Player) * NUM_PLAYERS);
+        h = HashPlayers(h);
         h = Fnv1a(h, &gRandomSeed16, sizeof(gRandomSeed16));
         h = Fnv1a(h, &gGamestate, sizeof(gGamestate));
         if (sDump) {
@@ -792,6 +867,10 @@ int KartNet_WantsLocalView(void) {
     return sState != NET_OFF && sRaceRequested && sFullView && gActiveScreenMode == SCREEN_MODE_2P_SPLITSCREEN_VERTICAL;
 }
 
+int KartNet_SkipSplitRender(void) {
+    return KartNet_WantsLocalView() && sSingleView;
+}
+
 void KartNet_RenderLocalView(void* splitStart) {
     /* The race is simulated, and drawn, as a normal 2-player split-screen race
      * on both sides: drawing updates per-screen state inside gPlayers
@@ -817,12 +896,27 @@ void KartNet_RenderLocalView(void* splitStart) {
     view->screenStartX = SCREEN_WIDTH / 2;
     view->screenStartY = SCREEN_HEIGHT / 2;
     gScreenAspect = (f32) SCREEN_WIDTH / (f32) SCREEN_HEIGHT;
+    /* Kart level-of-detail / shadow / particle distances: use the 1-player
+     * values (spawn_players.c func_80039AE4); 2-player ones are shorter. */
+    s16 lod[5] = { D_80165570, D_80165574, D_80165578, D_8016557A, D_80165580 };
+    if (gModeSelection != BATTLE) {
+        D_80165570 = 0x15E;
+        D_80165574 = 0x1F4;
+        D_80165578 = 0x4B0;
+        D_8016557A = -0xA;
+        D_80165580 = 0xFA;
+    }
     if (sLocalPlayer == 0) {
         render_screens(view, RENDER_SCREEN_MODE_2P_VERTICAL_PLAYER_ONE, 1, 0);
     } else {
         render_screens(view, RENDER_SCREEN_MODE_2P_VERTICAL_PLAYER_TWO, 2, 1);
     }
     gScreenAspect = aspect;
+    D_80165570 = lod[0];
+    D_80165574 = lod[1];
+    D_80165578 = lod[2];
+    D_8016557A = lod[3];
+    D_80165580 = lod[4];
     {
         Vp fullViewport = view->viewport; /* read by the GPU later */
         *view = savedView;
@@ -830,5 +924,7 @@ void KartNet_RenderLocalView(void* splitStart) {
     }
 
     gNumScreens = numScreens;
-    memcpy(gPlayers, sRenderSnapshot, sizeof(sRenderSnapshot));
+    if (!sSingleView) {
+        memcpy(gPlayers, sRenderSnapshot, sizeof(sRenderSnapshot));
+    }
 }

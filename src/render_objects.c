@@ -3,6 +3,7 @@
  * A more suitable name may be print.c
  **/
 
+#include "port/KartNet.h"
 #include <libultraship.h>
 #include <libultra/gbi.h>
 #include <stdio.h>
@@ -1617,7 +1618,8 @@ void render_texture_rectangle_wide(s32 x, s32 y, s32 width, s32 height, s32 arg4
     s32 coordX2 = 0;
 
     if (arg6 == 0) {
-        switch (gScreenModeSelection) {
+        // Netplay full view (KartNet): one player's HUD on the whole screen, laid out like 1P.
+        switch (KartNet_WantsLocalView() ? SCREEN_MODE_1P : gScreenModeSelection) {
             case SCREEN_MODE_1P:
             case SCREEN_MODE_3P_4P_SPLITSCREEN:
             case SCREEN_MODE_2P_SPLITSCREEN_HORIZONTAL:
@@ -1633,8 +1635,10 @@ void render_texture_rectangle_wide(s32 x, s32 y, s32 width, s32 height, s32 arg4
                                         (arg5 << 5), 4 << 10, 1 << 10);
                 break;
             case SCREEN_MODE_2P_SPLITSCREEN_VERTICAL:
-                gSPTextureRectangle(gDisplayListHead++, xl << 2, yl, xh << 2, yh2, G_TX_RENDERTILE, arg4 << 5,
-                                    (arg5 << 5), 1 << 10, 1 << 10);
+                // Copy mode (like the other cases): 4 texels per step, inclusive lower-right corner.
+                // With 1 << 10 every HUD glyph was drawn 4x wide (garbled "TIME"/"LAP" in 2P).
+                gSPTextureRectangle(gDisplayListHead++, xl << 2, yl, xh << 2, yh, G_TX_RENDERTILE, arg4 << 5,
+                                    (arg5 << 5), 4 << 10, 1 << 10);
                 break;
         }
         // OTRGetDimensionFromLeftEdge

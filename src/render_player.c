@@ -1,3 +1,4 @@
+#include "port/KartNet.h"
 #include <libultraship.h>
 #include <macros.h>
 #include <mk64.h>
@@ -124,7 +125,10 @@ u16 check_player_camera_collision(Player* player, Camera* camera, f32 arg2, f32 
             break;
         case SCREEN_MODE_2P_SPLITSCREEN_HORIZONTAL:
         case SCREEN_MODE_2P_SPLITSCREEN_VERTICAL:
-            var_v0 = 0x3058;
+            // Netplay full view (KartNet) draws one screen at the 1P size: cull like 1P.
+            // The wider 2P angle brings the far edge of the culling triangle in to
+            // ~450 units straight ahead (1P: ~640), so karts vanished at mid range.
+            var_v0 = KartNet_WantsLocalView() ? 0x293C : 0x3058;
             break;
         case SCREEN_MODE_3P_4P_SPLITSCREEN:
             var_v0 = 0x1FFE;
