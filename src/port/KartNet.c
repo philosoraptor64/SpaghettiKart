@@ -24,6 +24,8 @@
 #include "racing/skybox_and_splitscreen.h"
 #include "port/RaceStart.h"
 #include "spawn_players.h"
+#include "objects.h"
+#include "menu_items.h"
 #include <SDL2/SDL.h>
 
 extern OSContPad gControllerPads[4];
@@ -834,6 +836,14 @@ void KartNet_EndFrame(void) {
         c->hash = h;
         CompareCheckpoint((long) sTick);
     }
+    if (getenv("MK64_NET_TRACE_LAKITU") && sTick < 400 && sTick % 5 == 0) {
+        Object* a = &gObjectList[gIndexLakituList[0]];
+        Object* b = &gObjectList[gIndexLakituList[1]];
+        Log("# lakitu t%lu race%d go%d rs%d tmr%d z%.1f | p1 st%d tm%d tl%lx fl%x | p2 st%d tm%d tl%lx fl%x | spd %.2f %.2f",
+            sTick, gRaceFrameCounter, D_8018D160, gRaceState, D_8015011E, gPlayers[0].pos[2], a->state, a->timer, (unsigned long) (uintptr_t) a->tlutList & 0xffff,
+            a->status, b->state, b->timer, (unsigned long) (uintptr_t) b->tlutList & 0xffff, b->status,
+            gPlayers[0].speed, gPlayers[1].speed);
+    }
     sTick++;
     if (sMaxTicks && sTick >= sMaxTicks) {
         /* Keep feeding the peer our last inputs briefly so it can finish too. */
@@ -906,12 +916,24 @@ void KartNet_RenderLocalView(void* splitStart) {
         D_8016557A = -0xA;
         D_80165580 = 0xFA;
     }
+    /* Full-screen overlays (the lightning flash, menu_items.c func_8009E2F0)
+     * take their box from the split screen's area: use the whole screen. */
+    struct UnkStruct_8018E7E8 boxPos[2] = { D_8018E7E8[0], D_8018E7E8[1] };
+    struct UnkStruct_8018E7E8 boxSize[2] = { D_8018E810[0], D_8018E810[1] };
+    for (int i = 0; i < 2; i++) {
+        D_8018E7E8[i] = D_8018E7E8[4];
+        D_8018E810[i] = D_8018E810[4];
+    }
     if (sLocalPlayer == 0) {
         render_screens(view, RENDER_SCREEN_MODE_2P_VERTICAL_PLAYER_ONE, 1, 0);
     } else {
         render_screens(view, RENDER_SCREEN_MODE_2P_VERTICAL_PLAYER_TWO, 2, 1);
     }
     gScreenAspect = aspect;
+    for (int i = 0; i < 2; i++) {
+        D_8018E7E8[i] = boxPos[i];
+        D_8018E810[i] = boxSize[i];
+    }
     D_80165570 = lod[0];
     D_80165574 = lod[1];
     D_80165578 = lod[2];

@@ -28,6 +28,7 @@
 #include "effects.h"
 #include <assets/textures/boo_frames.h>
 #include "port/Game.h"
+#include "port/KartNet.h"
 #include "port/Engine.h"
 #include "engine/editor/Editor.h"
 #include "engine/tracks/Track.h"
@@ -207,6 +208,11 @@ void func_8006F008(void) {
 
     switch (gPlayerCount) {
         case 2:
+            if (KartNet_WantsLocalView()) {
+                // netplay full view: keep the track's 1-player minimap position
+                CM_GetProps()->Minimap.Pos[PLAYER_TWO] = CM_GetProps()->Minimap.Pos[PLAYER_ONE];
+                break;
+            }
             // Set X coord
             if (!IsToadsTurnpike()) {
                 CM_GetProps()->Minimap.Pos[PLAYER_ONE].X = 265;
@@ -265,14 +271,18 @@ void func_8006F8CC(void) {
             D_801657E8 = 0;
             D_801657F8 = 1;
         } else if (gPlayerCount == 2) {
-            if (gModeSelection != (s32) 3) {
-                gHUDModes = 1;
-                D_801657F0 = 1;
-                D_80165800[0] = D_80165800[1] = 0;
-            }
+            if (KartNet_WantsLocalView()) {
+                // netplay full view: minimap on, like 1 player (C-right still toggles it)
+            } else {
+                if (gModeSelection != (s32) 3) {
+                    gHUDModes = 1;
+                    D_801657F0 = 1;
+                    D_80165800[0] = D_80165800[1] = 0;
+                }
 
-            CM_GetProps()->Minimap.Pos[0].Y = 65;
-            CM_GetProps()->Minimap.Pos[1].Y = 180;
+                CM_GetProps()->Minimap.Pos[0].Y = 65;
+                CM_GetProps()->Minimap.Pos[1].Y = 180;
+            }
         }
         func_8006F824(0);
     } else {

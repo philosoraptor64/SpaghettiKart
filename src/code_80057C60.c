@@ -700,7 +700,12 @@ static void render_hud_netplay_local(s32 playerId) {
     FrameInterpolation_RecordOpenChild("HudMatrix", 0);
     set_matrix_hud_screen();
     netplay_hud_push(playerId);
-    draw_simplified_hud(playerId);
+    // like draw_simplified_hud, but the timer and lap stay next to the minimap (as in 1 player)
+    if ((gModeSelection != BATTLE) && (gIsHUDVisible != 0)) {
+        render_hud_timer(playerId);
+        draw_simplified_lap_count(playerId);
+    }
+    draw_item_window(playerId);
     netplay_hud_pop(playerId);
     FrameInterpolation_RecordCloseChild();
 }
@@ -889,7 +894,17 @@ void func_800591B4(void) {
                     func_800514BC();
                 }
                 if ((!gDemoMode) && (D_801657E8 != false)) {
-                    if (D_80165800[0] != 0) {
+                    if (KartNet_WantsLocalView()) {
+                        // netplay full view: the local player's minimap (toggled by its own C-right)
+                        s32 local = KartNet_LocalPlayer();
+                        if (D_80165800[local] != 0) {
+                            func_8004EE54(local);
+                            if (gModeSelection != BATTLE) {
+                                set_minimap_finishline_position(local);
+                            }
+                            func_8004F3E4(local);
+                        }
+                    } else if (D_80165800[0] != 0) {
                         func_8004EE54(0);
                         if (gModeSelection != BATTLE) {
                             set_minimap_finishline_position(0);

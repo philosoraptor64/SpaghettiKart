@@ -28,6 +28,7 @@ extern "C" {
  *   MK64_NET_LOG=path       sync log (relative paths go to Documents on iOS)
  *   MK64_NET_FRAMES=n       quit after n netplay frames (tests)
  *   MK64_NET_BOT=n          scripted driver with seed n instead of the controller (tests)
+ *   MK64_NET_TRACE_LAKITU=1 log the start countdown state (tests)
  */
 
 void KartNet_BeginFrame(void);    /* before the gamestate switch */

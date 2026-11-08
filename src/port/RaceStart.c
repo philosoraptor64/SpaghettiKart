@@ -10,6 +10,11 @@
 
 void RaceStart_Request(const RaceStartParams* p) {
     gDemoMode = DEMO_MODE_INACTIVE;
+    /* gEnableDebugMode defaults to DEBUG_MODE (1) and only the menus replace it
+     * with the setting; we skip the menus. In debug mode Z during the
+     * countdown starts the race at once (race_logic.c RACE_STAGING), which
+     * made races start at the first red light. */
+    gEnableDebugMode = 0;
     gModeSelection = p->mode;
     gCCSelection = p->cc;
     gPlayerCount = (s8) p->playerCount;
