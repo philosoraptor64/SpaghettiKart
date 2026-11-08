@@ -25,6 +25,17 @@ static unsigned int sInputSeed = 1;
 static unsigned int sRngSeed = 0x1234;
 static int sCup = 0, sCourse = 0, sCC = CC_150, sChar = MARIO;
 
+/* Record (a human plays) / playback (inputs come from a recording). */
+typedef struct {
+    u16 button;
+    s8 stick_x;
+    s8 stick_y;
+} RecordedPad;
+static FILE* sRecord = NULL;
+static RecordedPad* sPlayback = NULL;
+static unsigned long sPlaybackCount = 0;
+static long sFinishedAt = -1;
+
 /* Script state (independent of the game's RNG). */
 static unsigned int sScriptState;
 static int sSteer = 0, sSteerTarget = 0;
@@ -54,8 +65,50 @@ static void Init(void) {
     sCC = (int) EnvInt("MK64_REPLAY_CC", CC_150);
     sChar = (int) EnvInt("MK64_REPLAY_CHAR", MARIO);
     sScriptState = sInputSeed * 2654435761u + 1;
+
+    const char* rec = getenv("MK64_REPLAY_RECORD");
+    const char* play = getenv("MK64_REPLAY_PLAY");
+    if (rec && *rec) {
+        sRecord = fopen(rec, "w");
+        if (sRecord == NULL) {
+            fprintf(stderr, "ReplayCheck: cannot write %s\n", rec);
+        } else if (getenv("MK64_REPLAY_FRAMES") == NULL) {
+            sMaxFrames = 9000; /* 5 minutes; normally ends shortly after the finish line */
+        }
+    } else if (play && *play) {
+        FILE* in = fopen(play, "r");
+        unsigned long cap = 1024;
+        sPlayback = (RecordedPad*) malloc(sizeof(RecordedPad) * cap);
+        unsigned long f;
+        unsigned int b;
+        int x, y;
+        char line[128];
+        while (in && fgets(line, sizeof(line), in)) {
+            if (line[0] == '#') {
+                continue;
+            }
+            if (sscanf(line, "%lu %x %d %d", &f, &b, &x, &y) != 4) {
+                continue;
+            }
+            if (sPlaybackCount == cap) {
+                cap *= 2;
+                sPlayback = (RecordedPad*) realloc(sPlayback, sizeof(RecordedPad) * cap);
+            }
+            sPlayback[sPlaybackCount].button = (u16) b;
+            sPlayback[sPlaybackCount].stick_x = (s8) x;
+            sPlayback[sPlaybackCount].stick_y = (s8) y;
+            sPlaybackCount++;
+        }
+        if (in) {
+            fclose(in);
+        } else {
+            fprintf(stderr, "ReplayCheck: cannot read %s\n", play);
+        }
+        sMaxFrames = sPlaybackCount;
+    }
     fprintf(sLog, "# ReplayCheck seed=%u rng=0x%04x cup=%d course=%d cc=%d char=%d frames=%lu player_size=%zu\n",
             sInputSeed, sRngSeed, sCup, sCourse, sCC, sChar, sMaxFrames, sizeof(Player));
+    fprintf(sLog, "# input: %s\n", sRecord ? "recording a human" : (sPlayback ? "playback" : "script"));
 }
 
 /* Called at the top of each game-thread iteration, before the gamestate switch. */
@@ -104,9 +157,28 @@ void ReplayCheck_OverrideInput(void) {
     if (!sActive) {
         return;
     }
+    if (sRecord != NULL) {
+        /* The human drives player 1 in the race; other ports and the menus are silenced. */
+        OSContPad live = gControllerPads[0];
+        memset(gControllerPads, 0, sizeof(OSContPad) * 4);
+        if (gGamestate == RACING) {
+            gControllerPads[0] = live;
+            fprintf(sRecord, "%lu %04x %d %d\n", sRaceFrame, live.button, live.stick_x, live.stick_y);
+            fflush(sRecord);
+        }
+        return;
+    }
     /* Real controllers never reach the game during a check. */
     memset(gControllerPads, 0, sizeof(OSContPad) * 4);
     if (gGamestate != RACING) {
+        return;
+    }
+    if (sPlayback != NULL) {
+        if (sRaceFrame < sPlaybackCount) {
+            gControllerPads[0].button = sPlayback[sRaceFrame].button;
+            gControllerPads[0].stick_x = sPlayback[sRaceFrame].stick_x;
+            gControllerPads[0].stick_y = sPlayback[sRaceFrame].stick_y;
+        }
         return;
     }
     unsigned long f = sRaceFrame;
@@ -150,7 +222,22 @@ void ReplayCheck_EndFrame(void) {
             gPlayers[0].pos[0], gPlayers[0].pos[1], gPlayers[0].pos[2], gPlayers[0].lapCount,
             gPlayers[0].currentRank);
     sRaceFrame++;
+    if (sRaceFrame % 30 == 0) {
+        fflush(sLog);
+    }
+    /* Recording: stop 5 s after player 1 completes the third lap. */
+    if (sRecord != NULL && sFinishedAt < 0 && gPlayers[0].lapCount >= 3) {
+        sFinishedAt = (long) sRaceFrame;
+        fprintf(sLog, "# player 1 finished at race frame %lu\n", sRaceFrame);
+    }
+    if (sRecord != NULL && sFinishedAt >= 0 && (long) sRaceFrame >= sFinishedAt + 150) {
+        sMaxFrames = sRaceFrame;
+    }
     if (sRaceFrame >= sMaxFrames) {
+        if (sRecord != NULL) {
+            fclose(sRecord);
+            sRecord = NULL;
+        }
         fprintf(sLog, "# done\n");
         fclose(sLog);
         sLog = NULL;
