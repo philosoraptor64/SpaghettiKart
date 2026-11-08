@@ -983,7 +983,57 @@ static void ApplyPendingReset() {
     gFadeModeSelection = FADE_MODE_LOGO;
 }
 
+#if defined(PLATFORM_IOS)
+#include <atomic>
+#include <SDL2/SDL.h>
+#include <spdlog/spdlog.h>
+#include <thread>
+#include <chrono>
+// iOS forbids GPU work while the app is in the background: Metal commands
+// issued then fail and leave the screen black after returning. Pause the whole
+// frame (game logic, rendering, audio mixing) between WILLENTERBACKGROUND and
+// DIDENTERFOREGROUND. UIKit delivers these through SDL's event watchers on
+// the main thread, synchronously, before the app actually goes away.
+static std::atomic<bool> sIosInBackground{ false };
+
+static int IosLifecycleWatch(void*, SDL_Event* event) {
+    switch (event->type) {
+        case SDL_APP_WILLENTERBACKGROUND:
+            sIosInBackground = true;
+            SPDLOG_INFO("iOS: entering background, pausing");
+            break;
+        case SDL_APP_DIDENTERFOREGROUND:
+            sIosInBackground = false;
+            SPDLOG_INFO("iOS: back in foreground, resuming");
+            break;
+        default:
+            break;
+    }
+    return 1;
+}
+
+static void IosInstallLifecycleWatch() {
+    SDL_AddEventWatch(IosLifecycleWatch, nullptr);
+}
+
+// Returns true while the app is backgrounded (the frame must be skipped).
+static bool IosWaitWhileBackgrounded() {
+    if (!sIosInBackground) {
+        return false;
+    }
+    // Keep pumping so the foreground event arrives; don't touch the GPU.
+    SDL_PumpEvents();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    return true;
+}
+#endif
+
 void push_frame() {
+#if defined(PLATFORM_IOS)
+    if (IosWaitWhileBackgrounded()) {
+        return;
+    }
+#endif
     ApplyPendingReset();
     GameEngine::StartAudioFrame();
     GameEngine::Instance->StartFrame();
@@ -1053,6 +1103,7 @@ extern "C"
     // SDL exposes the iPhone's accelerometer as a joystick, and libultraship
     // merges it into player 1's stick: tilting the phone would steer.
     SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0");
+    IosInstallLifecycleWatch();
 #endif
     // load_wasm();
     GameEngine::Create();
