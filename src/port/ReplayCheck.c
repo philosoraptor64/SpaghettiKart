@@ -12,6 +12,7 @@
 #include "code_800029B0.h"
 #include "buffers/random.h"
 #include "port/Game.h"
+#include "port/RaceStart.h"
 
 extern OSContPad gControllerPads[4];
 
@@ -141,28 +142,18 @@ void ReplayCheck_BeginFrame(void) {
         return;
     }
     sRaceRequested = 1;
-    gDemoMode = DEMO_MODE_INACTIVE;
-    gModeSelection = GRAND_PRIX;
-    gCCSelection = sCC;
-    gPlayerCount = 1;
-    gScreenModeSelection = SCREEN_MODE_1P;
-    gCupSelection = (s8) sCup;
-    gCourseIndexInCup = (s8) sCourse;
-    /* The port picks the track (and whether this is race 1 of the cup, which makes
-     * setup choose the 7 CPU drivers and the grid order) from the World's current
-     * cup, not from gCupSelection. Set it the way the cup menu would. */
     {
-        void* cups[] = { GetMushroomCup(), GetFlowerCup(), GetStarCup(), GetSpecialCup() };
-        int cup = (sCup >= 0 && sCup < 4) ? sCup : 0;
-        CM_SetCup(cups[cup]);
-        CM_SetCupIndex((size_t) cup);
-        SetCupCursorPosition((size_t) sCourse);
+        RaceStartParams p;
+        p.mode = GRAND_PRIX;
+        p.playerCount = 1;
+        p.cup = sCup;
+        p.course = sCourse;
+        p.cc = sCC;
+        p.chars[0] = sChar;
+        p.chars[1] = gCharacterSelections[1]; /* unused in 1P; left as it was */
+        p.rng = sRngSeed;
+        RaceStart_Request(&p);
     }
-    gCharacterSelections[0] = (s8) sChar;
-    gIsMirrorMode = 0;
-    gMenuSelection = RACING_DUPLICATE; /* anything but START_MENU, so setup_race uses the cup */
-    gRandomSeed16 = (u16) sRngSeed;    /* setup_race uses the RNG for spawn order */
-    gGamestateNext = RACING;
     fprintf(sLog, "# race requested at boot frame %lu\n", sBootFrames);
 }
 

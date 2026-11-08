@@ -29,6 +29,7 @@
 #include "menu_items.h"
 #include "code_80057C60.h"
 #include "port/ReplayCheck.h"
+#include "port/KartNet.h"
 #include "player_controller.h"
 #include "render_player.h"
 #include "racing/actors.h"
@@ -397,6 +398,7 @@ void read_controllers(void) {
     // osRecvMesg(&gSIEventMesgQueue, &msg, OS_MESG_BLOCK);
     osContGetReadData(gControllerPads);
     ReplayCheck_OverrideInput();
+    KartNet_OverrideInput();
     update_controller(0);
     update_controller(1);
     update_controller(2);
@@ -1170,6 +1172,7 @@ void thread5_iteration(void) {
         return;
     }
     ReplayCheck_BeginFrame();
+    KartNet_BeginFrame();
     // Update the gamestate if it has changed (racing, menus, credits, etc.).
     if (gGamestateNext != gGamestate) {
         gGamestate = gGamestateNext;
@@ -1182,6 +1185,7 @@ void thread5_iteration(void) {
     clear_framebuffer(0); // Clear the framebuffer
     game_state_handler();
     ReplayCheck_EndFrame();
+    KartNet_EndFrame();
 
     // call_render_hook();
 
