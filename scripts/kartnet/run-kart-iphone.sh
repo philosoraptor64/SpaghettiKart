@@ -21,7 +21,7 @@ FRAMES=${FRAMES:-0}
 DELAY=${DELAY:-2}
 MODE=${MODE:-gp}
 
-DEVICE=${DEVICE:-$(xcrun devicectl list devices 2>/dev/null | awk '/connected/ && /iPhone/ {for(i=1;i<=NF;i++) if ($i ~ /^[0-9A-F]{8}-[0-9A-F]{16}$/) print $i}' | head -1)}
+DEVICE=${DEVICE:-$(xcrun devicectl list devices 2>/dev/null | awk '(/connected/ || /available/) && /physical/ && /iPhone/ {for(i=1;i<=NF;i++) if ($i ~ /^[0-9A-F]{8}-[0-9A-F]{16}$/) print $i}' | head -1)}
 [ -z "$DEVICE" ] && { echo "No connected iPhone found (plug it in and unlock it)."; exit 1; }
 MAC_IP=$(ipconfig getifaddr en0 || ipconfig getifaddr en1)
 [ -z "$MAC_IP" ] && { echo "This Mac has no Wi-Fi/Ethernet IP."; exit 1; }
