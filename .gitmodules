@@ -6,7 +6,8 @@
 	url = https://github.com/HarbourMasters/Torch
 [submodule "libultraship"]
 	path = libultraship
-	url = https://github.com/Kenix3/libultraship
+	url = https://github.com/philosoraptor64/libultraship-spaghettikart
+	branch = spaghettikart-ios
 [submodule "lib/wasm-micro-runtime"]
 	path = lib/wasm-micro-runtime
 	url = https://github.com/bytecodealliance/wasm-micro-runtime.git
