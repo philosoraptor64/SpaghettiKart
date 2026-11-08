@@ -19,6 +19,7 @@
 #include "main.h"
 #include "menus.h"
 #include "buffers/random.h"
+#include "code_800029B0.h"
 #include "port/RaceStart.h"
 #include <SDL2/SDL.h>
 
@@ -79,6 +80,7 @@ static unsigned long sSyncOk = 0, sSyncBad = 0, sStalls = 0;
 static double sStallMs = 0;
 static double sLastHelloMs = 0;
 static int sPeerPaused = 0;
+static int sInjectStart = 0; /* press Start once after returning from the background */
 static FILE* sDump = NULL; /* MK64_NET_DUMP: raw gPlayers at each checkpoint */
 
 /* ------------------------------------------------------------------------ */
@@ -554,6 +556,12 @@ void KartNet_SetPaused(int paused) {
     if (sState == NET_HANDSHAKE || sState == NET_RUNNING) {
         Log("local app %s", paused ? "paused (background)" : "resumed");
         SendPause(paused);
+        if (!paused && sState == NET_RUNNING && sRaceRequested) {
+            /* Come back to the game's own pause menu (in sync on both sides,
+             * since the press travels as a normal input) instead of straight
+             * into the race: the player resumes with Start when ready. */
+            sInjectStart = 1;
+        }
     }
 }
 
@@ -671,6 +679,14 @@ void KartNet_OverrideInput(void) {
         local.button = live.button;
         local.x = live.stick_x;
         local.y = live.stick_y;
+    }
+    if (sInjectStart) {
+        sInjectStart = 0;
+        if (gGamestate == RACING && gIsGamePaused == 0) {
+            /* A fresh Start press with L/R released opens the pause menu. */
+            local.button = (u16) ((local.button & ~(L_TRIG | R_TRIG)) | START_BUTTON);
+            Log("opening the pause menu after returning from the background");
+        }
     }
     sInputs[sLocalPlayer][top % RING] = local;
     sKnownTick[sLocalPlayer][top % RING] = top;
