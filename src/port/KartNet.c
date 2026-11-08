@@ -1,6 +1,7 @@
 #include "KartNet.h"
 
 #include <errno.h>
+#include <math.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <stdarg.h>
@@ -93,6 +94,33 @@ static int sFullView = 1; /* MK64_NET_VIEW=full (default) or split */
 static int sSingleView = 1;
 static int sInjectStart = 0; /* press Start once after returning from the background */
 static FILE* sDump = NULL; /* MK64_NET_DUMP: raw gPlayers at each checkpoint */
+
+/* Timing: round-trip time, frame advantage and the adaptive input delay.
+ * Each side schedules its own inputs `delay` frames ahead, so each side's delay
+ * only protects its PEER from waiting. Both use max(own wish, peer's wish); the
+ * wish comes from the recent round-trip times (up at once, down slowly). A side
+ * can change its delay alone without breaking determinism: the inputs are
+ * exchanged, and a tick is never scheduled twice (see ScheduleLocal). */
+#define RTT_SAMPLES 90
+static double sRtt[RTT_SAMPLES];
+static int sRttCount = 0, sRttNext = 0;
+static u32 sPeerStamp = 0, sLastEcho = 0;
+static double sPeerStampAt = 0;
+static int sHavePeerStamp = 0;
+static long sPeerTick = -1;
+static double sPeerTickAt = 0;
+static double sFrameMs = 1000.0 / 30, sLastFrameAt = 0, sAdvAvg = 0;
+static int sAdaptive = 1, sMinDelay = 2, sMaxDelay = 6;
+static int sWantDelay = 2, sPeerWantDelay = 0, sCurDelay = 2;
+static double sLowSince = 0;
+static long sLastScheduled = -1; /* highest tick holding a local input */
+static double sRttMaxWindow = 0;
+
+/* Simulated bad network for tests (outgoing packets of this side):
+ * MK64_NET_SIM_LATENCY / _JITTER (ms), _LOSS (%), _SPIKE (ms extra for
+ * _SPIKE_LEN ms every _SPIKE_EVERY s). */
+static int sSimLatency = 0, sSimJitter = 0, sSimLoss = 0, sSimSpike = 0, sSimSpikeEvery = 10, sSimSpikeLen = 1000;
+static double sSimStart = 0;
 
 /* ------------------------------------------------------------------------ */
 /* Helpers                                                                   */
@@ -236,10 +264,68 @@ static unsigned long long Get64(const u8* p) {
 enum { PKT_HELLO = 1, PKT_CONFIG = 2, PKT_START = 3, PKT_INPUT = 4, PKT_PAUSE = 5 };
 static const u8 kMagic[4] = { 'M', 'K', 'N', '1' };
 
+static void SendNow(const u8* buf, size_t len) {
+    sendto(sSock, buf, len, 0, (const struct sockaddr*) &sPeer, sizeof(sPeer));
+}
+
+typedef struct {
+    double at;
+    size_t len;
+    u8 data[512];
+} SimPacket;
+#define SIM_QUEUE 512
+static SimPacket sSimQueue[SIM_QUEUE];
+static int sSimQueued = 0;
+static unsigned int sSimRng = 0x2545F491;
+
+static unsigned int SimRand(void) { /* own generator: never the game's RNG */
+    sSimRng ^= sSimRng << 13;
+    sSimRng ^= sSimRng >> 17;
+    sSimRng ^= sSimRng << 5;
+    return sSimRng;
+}
+
 static void SendRaw(const u8* buf, size_t len) {
-    if (sHavePeer) {
-        sendto(sSock, buf, len, 0, (const struct sockaddr*) &sPeer, sizeof(sPeer));
+    if (!sHavePeer) {
+        return;
     }
+    if (sSimLatency || sSimJitter || sSimLoss || sSimSpike) {
+        if (sSimLoss && (int) (SimRand() % 100) < sSimLoss) {
+            return;
+        }
+        if (sSimQueued < SIM_QUEUE && len <= sizeof(sSimQueue[0].data)) {
+            double now = NowMs();
+            double extra = sSimLatency + (sSimJitter ? (double) (SimRand() % (unsigned) (sSimJitter + 1)) : 0);
+            if (sSimSpike && sSimSpikeEvery > 0) {
+                double t = fmod(now - sSimStart, sSimSpikeEvery * 1000.0);
+                if (t < sSimSpikeLen) {
+                    extra += sSimSpike;
+                }
+            }
+            SimPacket* q = &sSimQueue[sSimQueued++];
+            q->at = now + extra;
+            q->len = len;
+            memcpy(q->data, buf, len);
+        }
+        return;
+    }
+    SendNow(buf, len);
+}
+
+static void FlushSim(void) {
+    if (sSimQueued == 0) {
+        return;
+    }
+    double now = NowMs();
+    int kept = 0;
+    for (int i = 0; i < sSimQueued; i++) {
+        if (sSimQueue[i].at <= now) {
+            SendNow(sSimQueue[i].data, sSimQueue[i].len);
+        } else {
+            sSimQueue[kept++] = sSimQueue[i];
+        }
+    }
+    sSimQueued = kept;
 }
 
 static size_t Header(u8* buf, u8 type) {
@@ -316,7 +402,44 @@ static void SendInputs(long top) {
         }
     }
     *countAt = count;
+    /* Timing: our tick, a time stamp, the peer's last stamp echoed back with
+     * how long we held it (-> round-trip time), and our wished input delay. */
+    double now = NowMs();
+    Put32(buf + n, (u32) sTick);
+    Put32(buf + n + 4, (u32) (long long) now);
+    Put32(buf + n + 8, sHavePeerStamp ? sPeerStamp : 0);
+    Put32(buf + n + 12, sHavePeerStamp ? (u32) (now - sPeerStampAt) : 0xFFFFFFFFu);
+    buf[n + 16] = (u8) sWantDelay;
+    n += 17;
     SendRaw(buf, n);
+}
+
+static void AddRtt(double ms) {
+    sRtt[sRttNext] = ms;
+    sRttNext = (sRttNext + 1) % RTT_SAMPLES;
+    if (sRttCount < RTT_SAMPLES) {
+        sRttCount++;
+    }
+    if (ms > sRttMaxWindow) {
+        sRttMaxWindow = ms;
+    }
+}
+
+static int CmpDouble(const void* a, const void* b) {
+    double x = *(const double*) a, y = *(const double*) b;
+    return (x > y) - (x < y);
+}
+
+/* Percentile (0..1) of the recent round-trip times; 0 if none yet. */
+static double RttPercentile(double q) {
+    if (sRttCount == 0) {
+        return 0;
+    }
+    double tmp[RTT_SAMPLES];
+    memcpy(tmp, sRtt, sizeof(double) * (size_t) sRttCount);
+    qsort(tmp, (size_t) sRttCount, sizeof(double), CmpDouble);
+    int i = (int) (q * (sRttCount - 1) + 0.5);
+    return tmp[i];
 }
 
 static void CompareCheckpoint(long tick) {
@@ -330,6 +453,10 @@ static void CompareCheckpoint(long tick) {
         if (tick % (HASH_EVERY * 10) == 0) {
             Log("sync tick %ld OK %016llx (ok %lu, desync %lu, stalls %lu / %.0f ms)", tick, l->hash, sSyncOk,
                 sSyncBad, sStalls, sStallMs);
+            Log("# timing: rtt median %.0f p90 %.0f max %.0f ms, delay %d (wishes %d/%d), frame %.1f ms, ahead %.2f",
+                RttPercentile(0.5), RttPercentile(0.9), sRttMaxWindow, sCurDelay, sWantDelay, sPeerWantDelay, sFrameMs,
+                sAdvAvg);
+            sRttMaxWindow = 0;
         }
     } else {
         sSyncBad++;
@@ -442,6 +569,27 @@ static void HandlePacket(const u8* buf, size_t len, const struct sockaddr_in* fr
                     len -= 12;
                 }
             }
+            if (len >= 17) {
+                double now = NowMs();
+                long peerTick = (long) Get32(p);
+                u32 echo = Get32(p + 8);
+                u32 held = Get32(p + 12);
+                if (peerTick > sPeerTick) {
+                    sPeerTick = peerTick;
+                    sPeerTickAt = now;
+                }
+                sPeerStamp = Get32(p + 4);
+                sPeerStampAt = now;
+                sHavePeerStamp = 1;
+                if (held != 0xFFFFFFFFu && echo != sLastEcho) {
+                    sLastEcho = echo;
+                    double rtt = (double) (u32) ((u32) (long long) now - echo) - (double) held;
+                    if (rtt >= 0 && rtt < 5000) {
+                        AddRtt(rtt);
+                    }
+                }
+                sPeerWantDelay = p[16];
+            }
             break;
         }
         case PKT_PAUSE:
@@ -457,6 +605,7 @@ static void HandlePacket(const u8* buf, size_t len, const struct sockaddr_in* fr
 
 static void Poll(void) {
     u8 buf[1500];
+    FlushSim();
     for (;;) {
         struct sockaddr_in from;
         socklen_t fromLen = sizeof(from);
@@ -520,6 +669,15 @@ static void Init(void) {
         sFullView = !(view && strcmp(view, "split") == 0);
         sSingleView = !(view && strcmp(view, "double") == 0);
     }
+    sAdaptive = EnvInt("MK64_NET_ADAPTIVE", 1) != 0;
+    sMaxDelay = (int) EnvInt("MK64_NET_MAX_DELAY", 6);
+    sSimLatency = (int) EnvInt("MK64_NET_SIM_LATENCY", 0);
+    sSimJitter = (int) EnvInt("MK64_NET_SIM_JITTER", 0);
+    sSimLoss = (int) EnvInt("MK64_NET_SIM_LOSS", 0);
+    sSimSpike = (int) EnvInt("MK64_NET_SIM_SPIKE", 0);
+    sSimSpikeEvery = (int) EnvInt("MK64_NET_SIM_SPIKE_EVERY", 10);
+    sSimSpikeLen = (int) EnvInt("MK64_NET_SIM_SPIKE_LEN", 1000);
+    sSimStart = NowMs();
     sBot = (int) EnvInt("MK64_NET_BOT", 0);
     sBotDrift = (int) EnvInt("MK64_NET_BOT_DRIFT", 0);
     LoadReplay(getenv("MK64_NET_REPLAY"));
@@ -708,6 +866,79 @@ static NetPad BotInput(unsigned long f) {
     return pad;
 }
 
+/* Once per frame: frame time, frame advantage and the wished input delay. */
+static void UpdateTiming(void) {
+    double now = NowMs();
+    if (sLastFrameAt > 0) {
+        double d = now - sLastFrameAt;
+        if (d > 5 && d < 45) { /* ignore stalls */
+            sFrameMs = sFrameMs * 0.95 + d * 0.05;
+        }
+    }
+    sLastFrameAt = now;
+    if (sPeerTick >= 0 && sRttCount > 0) {
+        /* Frames we are ahead of the peer (n64net time sync will act on this). */
+        double peerNow = sPeerTick + (now - sPeerTickAt + RttPercentile(0.5) / 2) / sFrameMs;
+        sAdvAvg = sAdvAvg * 0.9 + ((double) sTick - peerNow) * 0.1;
+    }
+    if (!sAdaptive || sRttCount < 10) {
+        return;
+    }
+    /* The peer's input for tick T leaves it at its tick T - delay and must arrive
+     * before we reach T: cover the one-way time of most recent packets. The
+     * measured round trip includes about a frame of polling (packets are read
+     * once per frame on each side), which the +1 frame below already covers. */
+    double oneWay = (RttPercentile(0.9) - sFrameMs) / 2;
+    if (oneWay < 0) {
+        oneWay = 0;
+    }
+    int want = (int) ceil((oneWay + 8) / sFrameMs) + 1;
+    if (want < sMinDelay) {
+        want = sMinDelay;
+    }
+    if (want > sMaxDelay) {
+        want = sMaxDelay;
+    }
+    if (want > sWantDelay) {
+        sWantDelay = want; /* worse network: protect at once */
+        sLowSince = 0;
+    } else if (want < sWantDelay) {
+        if (sLowSince == 0) {
+            sLowSince = now;
+        } else if (now - sLowSince > 8000) {
+            sWantDelay--; /* calmer for 8 s: one frame less */
+            sLowSince = now;
+        }
+    } else {
+        sLowSince = 0;
+    }
+}
+
+static int CurrentDelay(void) {
+    int d = sAdaptive ? (sWantDelay > sPeerWantDelay ? sWantDelay : sPeerWantDelay) : sDelay;
+    if (d != sCurDelay) {
+        Log("input delay %d -> %d frames at tick %lu (rtt median %.0f, p90 %.0f ms; wishes %d/%d)", sCurDelay, d, sTick,
+            RttPercentile(0.5), RttPercentile(0.9), sWantDelay, sPeerWantDelay);
+        sCurDelay = d;
+    }
+    return d;
+}
+
+/* Put this frame's local input at tick sTick + delay. Ticks are never
+ * scheduled twice: after the delay grows, the gap is filled with this input;
+ * after it shrinks, inputs are dropped until sTick + delay passes the last
+ * scheduled tick. */
+static void ScheduleLocal(const NetPad* local, int delay) {
+    long target = (long) sTick + delay;
+    for (long t = sLastScheduled + 1; t <= target; t++) {
+        sInputs[sLocalPlayer][t % RING] = *local;
+        sKnownTick[sLocalPlayer][t % RING] = t;
+    }
+    if (target > sLastScheduled) {
+        sLastScheduled = target;
+    }
+}
+
 void KartNet_OverrideInput(void) {
     if (!sInitDone) {
         Init();
@@ -723,14 +954,18 @@ void KartNet_OverrideInput(void) {
     }
 
     /* Schedule this frame's local input DELAY frames ahead. */
-    long top = (long) sTick + sDelay;
     if (sTick == 0) {
+        sMinDelay = sDelay; /* the host's setting is the floor */
+        sWantDelay = sCurDelay = sDelay;
         for (long t = 0; t < sDelay; t++) {
             NetPad zero = { 0, 0, 0 };
             sInputs[sLocalPlayer][t % RING] = zero;
             sKnownTick[sLocalPlayer][t % RING] = t;
         }
+        sLastScheduled = sDelay - 1;
     }
+    UpdateTiming();
+    int delay = CurrentDelay();
     NetPad local;
     if (sReplay) {
         NetPad none = { 0, 0, 0 };
@@ -750,8 +985,8 @@ void KartNet_OverrideInput(void) {
             Log("opening the pause menu after returning from the background");
         }
     }
-    sInputs[sLocalPlayer][top % RING] = local;
-    sKnownTick[sLocalPlayer][top % RING] = top;
+    ScheduleLocal(&local, delay);
+    long top = sLastScheduled;
     SendInputs(top);
 
     /* Lockstep: wait for the other player's input for this frame. */
@@ -850,7 +1085,7 @@ void KartNet_EndFrame(void) {
         double end = NowMs() + 1500;
         while (NowMs() < end) {
             Poll();
-            SendInputs((long) sTick - 1 + sDelay);
+            SendInputs(sLastScheduled);
             usleep(16000);
         }
         Log("done after %lu frames: %lu checkpoints in sync, %lu desynced, %lu stalls (%.0f ms)", sTick, sSyncOk,

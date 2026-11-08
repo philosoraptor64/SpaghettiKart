@@ -20,7 +20,11 @@ extern "C" {
  *   MK64_NET_HOST=1         this side hosts (player 1); otherwise guest (player 2)
  *   MK64_NET_BIND=ip:port   local UDP address (default 0.0.0.0:7101 host, :0 guest)
  *   MK64_NET_PEER=ip:port   the host's address (guest only)
- *   MK64_NET_DELAY=2        input delay in frames (host decides)
+ *   MK64_NET_DELAY=2        minimum input delay in frames (host decides)
+ *   MK64_NET_ADAPTIVE=1     raise the delay while the network is slow (0 = fixed)
+ *   MK64_NET_MAX_DELAY=6    upper limit for the adaptive delay
+ *   MK64_NET_SIM_LATENCY/_JITTER (ms), _LOSS (%), _SPIKE (ms for _SPIKE_LEN ms
+ *                           every _SPIKE_EVERY s): simulated bad network (tests)
  *   MK64_NET_MODE=gp|vs     Grand Prix (6 CPUs) or Versus (host decides)
  *   MK64_NET_CUP/COURSE/CC  track and engine class (host decides)
  *   MK64_NET_CHAR=n         this side's character (0 Mario .. 7 Bowser)

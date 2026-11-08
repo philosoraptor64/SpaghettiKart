@@ -10,6 +10,8 @@
 #   MODE=gp|vs   Grand Prix with CPUs (default) or Versus
 #   VIEW=full|split|single (HOST_VIEW/GUEST_VIEW per side), DRIFT=1 bots also drift
 #   HOST_REPLAY/GUEST_REPLAY=file  drive that side from a ReplayCheck input recording
+#   LATENCY/JITTER (ms), LOSS (%), SPIKE (ms, every SPIKE_EVERY s for SPIKE_LEN ms)
+#                simulated bad network, both directions; ADAPTIVE=0 fixed input delay
 #   CUP, COURSE, CC, HOST_CHAR, GUEST_CHAR, SEED
 set -u
 SK="$(cd "$(dirname "$0")/../.." && pwd)"; ROOT="${KARTNET_LOGS_ROOT:-$SK/..}"
@@ -41,6 +43,10 @@ guest_env=("${common[@]}" MK64_NET_BIND=127.0.0.1:7102 MK64_NET_PEER=127.0.0.1:7
 [ -n "${HOST_REPLAY:-}" ] && host_env+=(MK64_NET_REPLAY="$HOST_REPLAY")
 [ -n "${GUEST_REPLAY:-}" ] && guest_env+=(MK64_NET_REPLAY="$GUEST_REPLAY")
 [ -n "${DRIFT:-}" ] && host_env+=(MK64_NET_BOT_DRIFT=1) && guest_env+=(MK64_NET_BOT_DRIFT=1)
+for v in LATENCY JITTER LOSS SPIKE SPIKE_EVERY SPIKE_LEN; do
+    [ -n "${!v:-}" ] && host_env+=(MK64_NET_SIM_$v="${!v}") && guest_env+=(MK64_NET_SIM_$v="${!v}")
+done
+[ -n "${ADAPTIVE:-}" ] && host_env+=(MK64_NET_ADAPTIVE="$ADAPTIVE") && guest_env+=(MK64_NET_ADAPTIVE="$ADAPTIVE")
 if [ -n "${DUMP:-}" ]; then host_env+=(MK64_NET_DUMP="$LOGS/host-dump.bin"); guest_env+=(MK64_NET_DUMP="$LOGS/guest-dump.bin"); fi
 
 echo "Logs: $LOGS"
