@@ -25,7 +25,8 @@
 s32 sGfxSeekPosition;
 s32 sPackedSeekPosition;
 
-static u8 sMemoryPool[0x10000000] ALIGNED4096;
+/* outside the snapshot: Rollback.cpp copies only the used part */
+MK_SNAPSHOT_OUTSIDE static u8 sMemoryPool[0x10000000] ALIGNED4096;
 uintptr_t sPoolEnd = (uintptr_t) (sMemoryPool + sizeof(sMemoryPool));
 
 uintptr_t sPoolFreeSpace;

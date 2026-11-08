@@ -17,7 +17,7 @@
 #include "engine/Matrix.h"
 #include "port/interpolation/FrameInterpolation.h"
 
-Mat4 sInterpolationMatrixStack[0x1000];
+MK_SNAPSHOT_OUTSIDE Mat4 sInterpolationMatrixStack[0x1000];
 Mat4* gInterpolationMatrix = &sInterpolationMatrixStack[0];
 
 UNUSED void operator_or(s32* arg0, s32 arg1) {

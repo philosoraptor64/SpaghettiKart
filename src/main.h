@@ -72,6 +72,8 @@ void create_gfx_task_structure(void);
 void init_controllers(void);
 void update_controller(s32);
 void read_controllers(void);
+void update_all_controllers(void);
+void rollback_sim_frame(void);
 void func_80000BEC(void);
 void dispatch_audio_sptask(struct SPTask*);
 void exec_display_list(struct SPTask*);

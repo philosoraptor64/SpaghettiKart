@@ -30,6 +30,7 @@
 #include "code_80057C60.h"
 #include "port/ReplayCheck.h"
 #include "port/KartNet.h"
+#include "port/Rollback.h"
 #include "player_controller.h"
 #include "render_player.h"
 #include "racing/actors.h"
@@ -61,7 +62,7 @@ struct SPTask* gActiveSPTask = NULL;
 struct SPTask* sCurrentAudioSPTask = NULL;
 struct SPTask* sCurrentDisplaySPTask = NULL;
 struct SPTask* sNextAudioSPTask = NULL;
-struct SPTask* sNextDisplaySPTask = NULL;
+MK_SNAPSHOT_OUTSIDE struct SPTask* sNextDisplaySPTask = NULL;
 
 struct Controller gControllers[NUM_PLAYERS];
 struct Controller* gControllerOne = &gControllers[0];
@@ -84,7 +85,7 @@ Player* gPlayerSeven = &gPlayers[6];
 Player* gPlayerEight = &gPlayers[7];
 
 UNUSED s32 D_800FD850[3];
-struct GfxPool gGfxPools[2];
+MK_SNAPSHOT_OUTSIDE struct GfxPool gGfxPools[2];
 struct GfxPool* gGfxPool;
 
 UNUSED s32 gfxPool_padding; // is this necessary?
@@ -135,7 +136,7 @@ struct SPTask* gGfxSPTask;
 s32 D_801502A0;
 s32 D_801502A4;
 u16* gPhysicalFramebuffers[3];
-u16 gPortFramebuffers[3][SCREEN_WIDTH * SCREEN_HEIGHT];
+MK_SNAPSHOT_OUTSIDE u16 gPortFramebuffers[3][SCREEN_WIDTH * SCREEN_HEIGHT];
 uintptr_t gPhysicalZBuffer;
 UNUSED u32 D_801502B8;
 UNUSED u32 D_801502BC;
@@ -399,6 +400,12 @@ void read_controllers(void) {
     osContGetReadData(gControllerPads);
     ReplayCheck_OverrideInput();
     KartNet_OverrideInput();
+    Rollback_SyncTestRecordInput();
+    update_all_controllers();
+}
+
+/* gControllerPads -> gControllers (also used to re-simulate frames). */
+void update_all_controllers(void) {
     update_controller(0);
     update_controller(1);
     update_controller(2);
@@ -740,6 +747,11 @@ void race_logic_loop(void) {
     }
     func_8005A070();
     CM_TickEditor();
+    if (gRollbackResim) {
+        /* Re-simulating for rollback: logic only. */
+        CM_RunGarbageCollector();
+        return;
+    }
     profiler_log_thread5_time(LEVEL_SCRIPT_EXECUTE);
     sNumVBlanks = 0;
     gNumScreens = 0;
@@ -1167,6 +1179,13 @@ void thread5_game_loop(void) {
     func_800C5CB8();
 }
 
+/* One race frame of logic, no drawing, from the inputs in gControllerPads
+ * (rollback re-simulation; port/Rollback.cpp). */
+void rollback_sim_frame(void) {
+    update_all_controllers();
+    race_logic_loop();
+}
+
 void thread5_iteration(void) {
     func_800CB2C4();
     calculate_delta_time();
@@ -1192,6 +1211,7 @@ void thread5_iteration(void) {
     FB_CreateFramebuffers();
     clear_framebuffer(0); // Clear the framebuffer
     game_state_handler();
+    Rollback_SyncTestEndFrame();
     ReplayCheck_EndFrame();
     KartNet_EndFrame();
 

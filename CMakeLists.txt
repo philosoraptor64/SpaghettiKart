@@ -139,6 +139,20 @@ target_include_directories(
                           ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(${PROJECT_NAME} PRIVATE YAML_CPP_STATIC_DEFINE)
 
+# Rollback snapshots: put the game's mutable C globals in the __MKSNAP segment
+# (src/port/SnapshotSection.h). -fno-common turns tentative definitions into
+# real ones so the section pragma applies to them. Netplay transport, the
+# replay checker and audio keep the default sections.
+if(APPLE AND CMAKE_C_COMPILER_ID MATCHES "Clang")
+  target_compile_options(${PROJECT_NAME} PRIVATE
+    $<$<COMPILE_LANGUAGE:C>:-fno-common>
+    $<$<COMPILE_LANGUAGE:C>:-include>
+    "$<$<COMPILE_LANGUAGE:C>:${CMAKE_CURRENT_SOURCE_DIR}/src/port/SnapshotSection.h>")
+  file(GLOB MK_SNAPSHOT_EXCLUDED "src/audio/*.c" "src/buffers/audio_heap.c")
+  list(APPEND MK_SNAPSHOT_EXCLUDED src/port/KartNet.c src/port/ReplayCheck.c)
+  set_source_files_properties(${MK_SNAPSHOT_EXCLUDED} PROPERTIES COMPILE_DEFINITIONS MK_SNAPSHOT_EXCLUDE=1)
+endif()
+
 if(SPAGHETTIKART_IOS)
   target_compile_definitions(${PROJECT_NAME} PRIVATE PLATFORM_IOS=1)
   set_xcode_property(${PROJECT_NAME} PRODUCT_BUNDLE_IDENTIFIER ${PROJECT_ID}

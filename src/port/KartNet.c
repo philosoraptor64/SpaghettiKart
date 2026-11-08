@@ -27,7 +27,13 @@
 #include "spawn_players.h"
 #include "objects.h"
 #include "menu_items.h"
+#include "port/Rollback.h"
 #include <SDL2/SDL.h>
+#if defined(__APPLE__)
+#include <mach-o/getsect.h>
+#include <mach-o/ldsyms.h>
+#include <mach-o/dyld.h>
+#endif
 
 extern OSContPad gControllerPads[4];
 
@@ -678,6 +684,10 @@ static void Init(void) {
     sSimSpikeEvery = (int) EnvInt("MK64_NET_SIM_SPIKE_EVERY", 10);
     sSimSpikeLen = (int) EnvInt("MK64_NET_SIM_SPIKE_LEN", 1000);
     sSimStart = NowMs();
+    {
+        char synctestPath[1024];
+        Rollback_SyncTestInit(DocumentsPath(getenv("MK64_SYNCTEST_LOG"), synctestPath, sizeof(synctestPath)));
+    }
     sBot = (int) EnvInt("MK64_NET_BOT", 0);
     sBotDrift = (int) EnvInt("MK64_NET_BOT_DRIFT", 0);
     LoadReplay(getenv("MK64_NET_REPLAY"));
@@ -803,6 +813,9 @@ void KartNet_BeginFrame(void) {
                     sCup, sCourse, sCC, sChars[0], sChars[1], sDelay);
         }
         Log("race requested (boot frame %lu)", sBootFrames);
+    }
+    if (sRaceRequested && gGamestate == RACING && gGamestateNext == RACING) {
+        Rollback_SyncTestBeginFrame((long) sTick);
     }
 }
 
@@ -1035,10 +1048,21 @@ void KartNet_OverrideInput(void) {
  * with one side drawing both screens and the other only its own, every other
  * field stayed identical over 3000 frames of drifting and items. */
 static Player sHashCopy[NUM_PLAYERS];
+static void MaskDrawingFields(Player* players);
 static unsigned long long HashPlayers(unsigned long long h) {
     memcpy(sHashCopy, gPlayers, sizeof(sHashCopy));
+    MaskDrawingFields(sHashCopy);
+    return Fnv1a(h, sHashCopy, sizeof(sHashCopy));
+}
+
+/* Zero the Player fields that only drawing writes (a copy of gPlayers). */
+void KartNet_MaskDrawingFields(void* players) {
+    MaskDrawingFields((Player*) players);
+}
+
+static void MaskDrawingFields(Player* players) {
     for (int i = 0; i < NUM_PLAYERS; i++) {
-        Player* p = &sHashCopy[i];
+        Player* p = &players[i];
         p->unk_002 = 0;
         memset(p->unk_048, 0, sizeof(p->unk_048));
         memset(p->unk_050, 0, sizeof(p->unk_050));
@@ -1048,7 +1072,71 @@ static unsigned long long HashPlayers(unsigned long long h) {
         memset(p->animGroupSelector, 0, sizeof(p->animGroupSelector));
         memset(p->particlePool3, 0, sizeof(p->particlePool3));
     }
-    return Fnv1a(h, sHashCopy, sizeof(sHashCopy));
+}
+
+/* MK64_NET_PROBE=dir: at race ticks MK64_NET_PROBE_AT (default 300) and
+ * +MK64_NET_PROBE_GAP (300) write the game's global memory (__data, __common,
+ * __bss without the 256 MB memory pool) and the used part of the memory pool,
+ * to find which state changes during a race (snapshot inventory). Mac only. */
+extern uintptr_t sPoolEnd;
+static void ProbeWrite(const char* dir, const char* name, const void* p, size_t n) {
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s-%s", dir, sIsHost ? "host" : "guest", name);
+    FILE* f = fopen(path, "wb");
+    if (f) {
+        fwrite(p, 1, n, f);
+        fclose(f);
+    }
+}
+static void ProbeMaybeDump(void) {
+#if defined(__APPLE__)
+    static const char* dir = NULL;
+    static long at = -1, gap = 300;
+    if (at < 0) {
+        dir = getenv("MK64_NET_PROBE");
+        at = EnvInt("MK64_NET_PROBE_AT", 300);
+        gap = EnvInt("MK64_NET_PROBE_GAP", 300);
+    }
+    if (!dir || ((long) sTick != at && (long) sTick != at + gap)) {
+        return;
+    }
+    int which = (long) sTick == at ? 0 : 1;
+    char name[64];
+    const char* sects[] = { "__data", "__common", "__bss" };
+    FILE* idx;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s-index%d.txt", dir, sIsHost ? "host" : "guest", which);
+    idx = fopen(path, "w");
+    uintptr_t poolStart = sPoolEnd - 0x10000000;
+    for (int i = 0; i < 3; i++) {
+        unsigned long size = 0;
+        u8* base = getsectiondata(&_mh_execute_header, "__DATA", sects[i], &size);
+        if (!base) {
+            continue;
+        }
+        uintptr_t b = (uintptr_t) base, e = b + size;
+        /* split around the memory pool */
+        if (poolStart >= b && poolStart < e) {
+            snprintf(name, sizeof(name), "%s_a_%d.bin", sects[i], which);
+            ProbeWrite(dir, name, base, poolStart - b);
+            fprintf(idx, "%s %lx %lx\n", name, (unsigned long) b, (unsigned long) (poolStart - b));
+            snprintf(name, sizeof(name), "%s_b_%d.bin", sects[i], which);
+            ProbeWrite(dir, name, (void*) sPoolEnd, e - sPoolEnd);
+            fprintf(idx, "%s %lx %lx\n", name, (unsigned long) sPoolEnd, (unsigned long) (e - sPoolEnd));
+        } else {
+            snprintf(name, sizeof(name), "%s_%d.bin", sects[i], which);
+            ProbeWrite(dir, name, base, size);
+            fprintf(idx, "%s %lx %lx\n", name, (unsigned long) b, (unsigned long) size);
+        }
+    }
+    size_t used = gNextFreeMemoryAddress - poolStart;
+    snprintf(name, sizeof(name), "pool_%d.bin", which);
+    ProbeWrite(dir, name, (void*) poolStart, used);
+    fprintf(idx, "%s %lx %lx\n", name, (unsigned long) poolStart, (unsigned long) used);
+    fprintf(idx, "slide %lx\n", (unsigned long) _dyld_get_image_vmaddr_slide(0));
+    fclose(idx);
+    Log("# probe %d written at tick %lu (pool used %zu bytes)", which, sTick, used);
+#endif
 }
 
 void KartNet_EndFrame(void) {
@@ -1079,6 +1167,7 @@ void KartNet_EndFrame(void) {
             a->status, b->state, b->timer, (unsigned long) (uintptr_t) b->tlutList & 0xffff, b->status,
             gPlayers[0].speed, gPlayers[1].speed);
     }
+    ProbeMaybeDump();
     sTick++;
     if (sMaxTicks && sTick >= sMaxTicks) {
         /* Keep feeding the peer our last inputs briefly so it can finish too. */

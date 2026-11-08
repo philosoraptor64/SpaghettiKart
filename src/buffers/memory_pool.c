@@ -9,4 +9,4 @@
  * for easier portability.
  * @warning should not really be used.
  */
-u8 sMemoryPool[MEMORY_POOL_SIZE];
+MK_SNAPSHOT_OUTSIDE u8 sMemoryPool[MEMORY_POOL_SIZE];
