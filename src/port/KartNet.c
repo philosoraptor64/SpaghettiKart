@@ -20,6 +20,7 @@
 #include "menus.h"
 #include "buffers/random.h"
 #include "port/RaceStart.h"
+#include <SDL2/SDL.h>
 
 extern OSContPad gControllerPads[4];
 
@@ -32,7 +33,9 @@ enum { NET_OFF, NET_HANDSHAKE, NET_RUNNING, NET_DONE };
 #define REDUNDANT 16      /* inputs repeated in every packet */
 #define HASH_EVERY 30     /* frames between state-hash checkpoints */
 #define HASH_SLOTS 16
-#define WAIT_TIMEOUT_MS 10000
+#define WAIT_TIMEOUT_MS 20000   /* give up if the peer is silent this long (and not paused) */
+#define PAUSED_TIMEOUT_MS 600000 /* ... or paused (app in the background) this long */
+#define START_BOOT_FRAME 30      /* both sides wait here, so they start from identical states */
 
 static int sInitDone = 0;
 static int sState = NET_OFF;
@@ -75,6 +78,8 @@ static Checkpoint sRemoteHashes[HASH_SLOTS];
 static unsigned long sSyncOk = 0, sSyncBad = 0, sStalls = 0;
 static double sStallMs = 0;
 static double sLastHelloMs = 0;
+static int sPeerPaused = 0;
+static FILE* sDump = NULL; /* MK64_NET_DUMP: raw gPlayers at each checkpoint */
 
 /* ------------------------------------------------------------------------ */
 /* Helpers                                                                   */
@@ -215,7 +220,7 @@ static unsigned long long Get64(const u8* p) {
 /* ------------------------------------------------------------------------ */
 /* Packets                                                                   */
 
-enum { PKT_HELLO = 1, PKT_CONFIG = 2, PKT_START = 3, PKT_INPUT = 4 };
+enum { PKT_HELLO = 1, PKT_CONFIG = 2, PKT_START = 3, PKT_INPUT = 4, PKT_PAUSE = 5 };
 static const u8 kMagic[4] = { 'M', 'K', 'N', '1' };
 
 static void SendRaw(const u8* buf, size_t len) {
@@ -256,6 +261,15 @@ static void SendStart(void) {
     u8 buf[8];
     size_t n = Header(buf, PKT_START);
     SendRaw(buf, n);
+}
+
+static void SendPause(int paused) {
+    u8 buf[8];
+    size_t n = Header(buf, PKT_PAUSE);
+    buf[n++] = (u8) (paused ? 1 : 0);
+    for (int i = 0; i < 3; i++) {
+        SendRaw(buf, n); /* no acks: repeat to survive a lost packet */
+    }
 }
 
 static void SendInputs(long top) {
@@ -366,6 +380,10 @@ static void HandlePacket(const u8* buf, size_t len, const struct sockaddr_in* fr
                 sState = NET_RUNNING; /* the START was lost, but the guest is running */
                 Log("guest is running (start ack lost); starting");
             }
+            if (sPeerPaused) {
+                sPeerPaused = 0;
+                Log("peer resumed");
+            }
             int player = p[0];
             if (player != 1 - sLocalPlayer) {
                 return;
@@ -413,6 +431,12 @@ static void HandlePacket(const u8* buf, size_t len, const struct sockaddr_in* fr
             }
             break;
         }
+        case PKT_PAUSE:
+            if (len >= 1 && sPeerPaused != (p[0] != 0)) {
+                sPeerPaused = p[0] != 0;
+                Log("peer %s", sPeerPaused ? "paused (app in the background); waiting" : "resumed");
+            }
+            break;
         default:
             break;
     }
@@ -457,6 +481,10 @@ static void Init(void) {
         sLog = fopen(logPath, "w");
     }
 
+    const char* dumpPath = DocumentsPath(getenv("MK64_NET_DUMP"), pathBuf, sizeof(pathBuf));
+    if (dumpPath && *dumpPath) {
+        sDump = fopen(dumpPath, "wb");
+    }
     sIsHost = EnvInt("MK64_NET_HOST", 0) != 0;
     sLocalPlayer = sIsHost ? 0 : 1;
     sDelay = (int) EnvInt("MK64_NET_DELAY", 2);
@@ -522,6 +550,13 @@ static void Init(void) {
     Log("%s; waiting for the %s", sIsHost ? "hosting" : "joining", sIsHost ? "guest" : "host");
 }
 
+void KartNet_SetPaused(int paused) {
+    if (sState == NET_HANDSHAKE || sState == NET_RUNNING) {
+        Log("local app %s", paused ? "paused (background)" : "resumed");
+        SendPause(paused);
+    }
+}
+
 int KartNet_IsActive(void) {
     if (!sInitDone) {
         Init();
@@ -541,7 +576,11 @@ void KartNet_BeginFrame(void) {
     }
     Poll();
     sBootFrames++;
-    if (sState == NET_HANDSHAKE) {
+    /* Both sides boot identically (no input) to START_BOOT_FRAME and wait there
+     * for the handshake, so the race starts from the same state on both: a side
+     * that kept running into the attract demo while waiting would carry
+     * leftover state into the race and desync. */
+    while (sState == NET_HANDSHAKE) {
         double now = NowMs();
         if (now - sLastHelloMs > 100) {
             sLastHelloMs = now;
@@ -553,10 +592,17 @@ void KartNet_BeginFrame(void) {
                 SendHello();
             }
         }
+        if (sBootFrames < START_BOOT_FRAME) {
+            return; /* keep booting meanwhile */
+        }
+        SDL_PumpEvents(); /* keep the window (and iOS life cycle) responsive */
+        usleep(5000);
+        Poll();
+    }
+    if (sState != NET_RUNNING) {
         return;
     }
-    /* Let boot finish (logo/menu setup) before jumping into the race. */
-    if (!sRaceRequested && sBootFrames >= 30) {
+    if (!sRaceRequested && sBootFrames >= START_BOOT_FRAME) {
         sRaceRequested = 1;
         RaceStartParams p;
         p.mode = sMode;
@@ -635,16 +681,26 @@ void KartNet_OverrideInput(void) {
     if (sKnownTick[remote][sTick % RING] != (long) sTick) {
         double start = NowMs(), lastSend = start;
         sStalls++;
+        double lastHeard = start, lastPump = start;
+        unsigned long remoteBefore = (unsigned long) (sRemoteContig + 1);
         while (sKnownTick[remote][sTick % RING] != (long) sTick) {
             usleep(500);
             Poll();
             double now = NowMs();
+            if (now - lastPump > 50) {
+                lastPump = now;
+                SDL_PumpEvents(); /* keep the window and the iOS life cycle responsive */
+            }
             if (now - lastSend > 16) {
                 lastSend = now;
                 SendInputs(top);
             }
-            if (now - start > WAIT_TIMEOUT_MS) {
-                Log("peer silent for %d s at tick %lu; netplay stopped", WAIT_TIMEOUT_MS / 1000, sTick);
+            if (sPeerPaused || (unsigned long) (sRemoteContig + 1) != remoteBefore) {
+                lastHeard = now;
+                remoteBefore = (unsigned long) (sRemoteContig + 1);
+            }
+            if (now - lastHeard > (sPeerPaused ? PAUSED_TIMEOUT_MS : WAIT_TIMEOUT_MS)) {
+                Log("peer silent for %.0f s at tick %lu; netplay stopped", (now - lastHeard) / 1000, sTick);
                 sState = NET_DONE;
                 return;
             }
@@ -669,6 +725,12 @@ void KartNet_EndFrame(void) {
         h = Fnv1a(h, gPlayers, sizeof(Player) * NUM_PLAYERS);
         h = Fnv1a(h, &gRandomSeed16, sizeof(gRandomSeed16));
         h = Fnv1a(h, &gGamestate, sizeof(gGamestate));
+        if (sDump) {
+            u32 t = (u32) sTick;
+            fwrite(&t, sizeof(t), 1, sDump);
+            fwrite(gPlayers, sizeof(Player), NUM_PLAYERS, sDump);
+            fflush(sDump);
+        }
         Checkpoint* c = &sLocalHashes[(sTick / HASH_EVERY) % HASH_SLOTS];
         c->tick = (long) sTick;
         c->hash = h;

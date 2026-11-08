@@ -988,6 +988,9 @@ static void ApplyPendingReset() {
 #include <SDL2/SDL.h>
 #include <spdlog/spdlog.h>
 #include <thread>
+extern "C" {
+#include "port/KartNet.h"
+}
 #include <chrono>
 // iOS forbids GPU work while the app is in the background: Metal commands
 // issued then fail and leave the screen black after returning. Pause the whole
@@ -1001,10 +1004,12 @@ static int IosLifecycleWatch(void*, SDL_Event* event) {
         case SDL_APP_WILLENTERBACKGROUND:
             sIosInBackground = true;
             SPDLOG_INFO("iOS: entering background, pausing");
+            KartNet_SetPaused(1);
             break;
         case SDL_APP_DIDENTERFOREGROUND:
             sIosInBackground = false;
             SPDLOG_INFO("iOS: back in foreground, resuming");
+            KartNet_SetPaused(0);
             break;
         default:
             break;

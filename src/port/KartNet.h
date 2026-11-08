@@ -34,6 +34,9 @@ void KartNet_BeginFrame(void);    /* before the gamestate switch */
 void KartNet_OverrideInput(void); /* right after osContGetReadData */
 void KartNet_EndFrame(void);      /* after game_state_handler */
 int KartNet_IsActive(void);
+/* The app is going to / coming back from the background (iOS): tells the peer
+ * to wait instead of timing out. */
+void KartNet_SetPaused(int paused);
 
 #ifdef __cplusplus
 }
