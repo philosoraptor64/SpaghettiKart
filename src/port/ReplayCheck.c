@@ -11,6 +11,7 @@
 #include "menus.h"
 #include "code_800029B0.h"
 #include "buffers/random.h"
+#include "port/Game.h"
 
 extern OSContPad gControllerPads[4];
 
@@ -131,6 +132,16 @@ void ReplayCheck_BeginFrame(void) {
     gScreenModeSelection = SCREEN_MODE_1P;
     gCupSelection = (s8) sCup;
     gCourseIndexInCup = (s8) sCourse;
+    /* The port picks the track (and whether this is race 1 of the cup, which makes
+     * setup choose the 7 CPU drivers and the grid order) from the World's current
+     * cup, not from gCupSelection. Set it the way the cup menu would. */
+    {
+        void* cups[] = { GetMushroomCup(), GetFlowerCup(), GetStarCup(), GetSpecialCup() };
+        int cup = (sCup >= 0 && sCup < 4) ? sCup : 0;
+        CM_SetCup(cups[cup]);
+        CM_SetCupIndex((size_t) cup);
+        SetCupCursorPosition((size_t) sCourse);
+    }
     gCharacterSelections[0] = (s8) sChar;
     gIsMirrorMode = 0;
     gMenuSelection = RACING_DUPLICATE; /* anything but START_MENU, so setup_race uses the cup */
@@ -214,6 +225,14 @@ static unsigned long long Fnv1a(unsigned long long h, const void* data, size_t l
 void ReplayCheck_EndFrame(void) {
     if (!sActive || gGamestate != RACING) {
         return;
+    }
+    if (sRaceFrame == 0) {
+        /* Grid sanity check: track, and each driver's character and start position. */
+        fprintf(sLog, "# track=%s cup=%u pos=%zu\n", GetCupName(), GetCupIndex(), GetCupCursorPosition());
+        for (int i = 0; i < NUM_PLAYERS; i++) {
+            fprintf(sLog, "# grid p%d char=%d pos=%.1f,%.1f type=%04x\n", i, gPlayers[i].characterId,
+                    gPlayers[i].pos[0], gPlayers[i].pos[2], gPlayers[i].type);
+        }
     }
     unsigned long long h = 1469598103934665603ull;
     h = Fnv1a(h, gPlayers, sizeof(Player) * NUM_PLAYERS);
