@@ -3,6 +3,7 @@
  * @warning there are too many variables here
  */
 
+#include "port/KartNet.h"
 #include <libultraship.h>
 #include <macros.h>
 #include <libultra/gbi.h>
@@ -786,6 +787,10 @@ void func_800590D4(void) {
                     }
                     break;
                 case 2:
+                    if (KartNet_WantsLocalView()) {
+                        func_8004E800(KartNet_LocalPlayer()); // netplay full view: own place only
+                        break;
+                    }
                     func_8004E800(PLAYER_ONE);
                     func_8004E800(PLAYER_TWO);
                     break;

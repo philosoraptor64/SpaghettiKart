@@ -20,6 +20,8 @@
 #include "menus.h"
 #include "buffers/random.h"
 #include "code_800029B0.h"
+#include "code_80057C60.h"
+#include "racing/skybox_and_splitscreen.h"
 #include "port/RaceStart.h"
 #include <SDL2/SDL.h>
 
@@ -80,6 +82,7 @@ static unsigned long sSyncOk = 0, sSyncBad = 0, sStalls = 0;
 static double sStallMs = 0;
 static double sLastHelloMs = 0;
 static int sPeerPaused = 0;
+static int sFullView = 1; /* MK64_NET_VIEW=full (default) or split */
 static int sInjectStart = 0; /* press Start once after returning from the background */
 static FILE* sDump = NULL; /* MK64_NET_DUMP: raw gPlayers at each checkpoint */
 
@@ -504,6 +507,10 @@ static void Init(void) {
     sChars[sLocalPlayer] = (int) EnvInt("MK64_NET_CHAR", sIsHost ? MARIO : LUIGI) % 8;
     sSeed = (unsigned int) EnvInt("MK64_NET_SEED", (long) (time(NULL) & 0xFFFF)) & 0xFFFF;
     sMaxTicks = (unsigned long) EnvInt("MK64_NET_FRAMES", 0);
+    {
+        const char* view = getenv("MK64_NET_VIEW");
+        sFullView = !(view && strcmp(view, "split") == 0);
+    }
     sBot = (int) EnvInt("MK64_NET_BOT", 0);
     sBotState = (unsigned int) sBot * 2654435761u + 1;
 
@@ -770,4 +777,58 @@ void KartNet_EndFrame(void) {
         }
         _exit(sSyncBad ? 3 : 0);
     }
+}
+
+/* ------------------------------------------------------------------------ */
+/* Rendering: one full-screen view of the local player                       */
+
+static Player sRenderSnapshot[NUM_PLAYERS];
+
+int KartNet_LocalPlayer(void) {
+    return sLocalPlayer;
+}
+
+int KartNet_WantsLocalView(void) {
+    return sState != NET_OFF && sRaceRequested && sFullView && gActiveScreenMode == SCREEN_MODE_2P_SPLITSCREEN_VERTICAL;
+}
+
+void KartNet_RenderLocalView(void* splitStart) {
+    /* The race is simulated, and drawn, as a normal 2-player split-screen race
+     * on both sides: drawing updates per-screen state inside gPlayers
+     * (visibility, animation frames, particles), which must stay identical.
+     * So both split views were just drawn as usual; drop their display-list
+     * commands (the GPU never draws them), then draw only the local player's
+     * screen with the 1-player viewport and aspect ratio, and finally undo
+     * everything that extra draw changed in gPlayers. */
+    gDisplayListHead = (Gfx*) splitStart;
+    memcpy(sRenderSnapshot, gPlayers, sizeof(sRenderSnapshot));
+    s32 numScreens = gNumScreens;
+
+    /* Draw through a copy of the local screen in the 4th screen slot, which is
+     * unused in 2-player races: the display list keeps pointing at that slot's
+     * viewport until the GPU reads it, and the real screens stay untouched. */
+    ScreenContext* local = (sLocalPlayer == 0) ? gScreenOneCtx : gScreenTwoCtx;
+    ScreenContext* view = &gScreenContexts[3];
+    ScreenContext savedView = *view;
+    f32 aspect = gScreenAspect;
+    *view = *local;
+    view->screenWidth = SCREEN_WIDTH;
+    view->screenHeight = SCREEN_HEIGHT;
+    view->screenStartX = SCREEN_WIDTH / 2;
+    view->screenStartY = SCREEN_HEIGHT / 2;
+    gScreenAspect = (f32) SCREEN_WIDTH / (f32) SCREEN_HEIGHT;
+    if (sLocalPlayer == 0) {
+        render_screens(view, RENDER_SCREEN_MODE_2P_VERTICAL_PLAYER_ONE, 1, 0);
+    } else {
+        render_screens(view, RENDER_SCREEN_MODE_2P_VERTICAL_PLAYER_TWO, 2, 1);
+    }
+    gScreenAspect = aspect;
+    {
+        Vp fullViewport = view->viewport; /* read by the GPU later */
+        *view = savedView;
+        view->viewport = fullViewport;
+    }
+
+    gNumScreens = numScreens;
+    memcpy(gPlayers, sRenderSnapshot, sizeof(sRenderSnapshot));
 }

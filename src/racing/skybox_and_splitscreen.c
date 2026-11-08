@@ -1,3 +1,4 @@
+#include "port/KartNet.h"
 #include <libultraship.h>
 #include <macros.h>
 #include <libultra/gbi.h>
@@ -265,6 +266,9 @@ void func_802A4300(void) {
 
     if (gActiveScreenMode == SCREEN_MODE_1P) {
         return;
+    }
+    if (KartNet_WantsLocalView()) {
+        return; // netplay full-screen view: no split-screen divider
     }
     if (D_800DC5B0 != 0) {
         return;

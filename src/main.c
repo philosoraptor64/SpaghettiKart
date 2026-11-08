@@ -748,6 +748,7 @@ void race_logic_loop(void) {
         select_framebuffer();
     }
 
+    Gfx* netSplitStart = gDisplayListHead; // netplay full-screen view (KartNet)
     switch (gActiveScreenMode) {
         case SCREEN_MODE_1P:
             render_screens(gScreenOneCtx, RENDER_SCREEN_MODE_1P_PLAYER_ONE, 0, 0);
@@ -795,6 +796,10 @@ void race_logic_loop(void) {
                 render_screens(gScreenFourCtx, RENDER_SCREEN_MODE_3P_4P_PLAYER_FOUR, 11, 3);
             }
             break;
+    }
+
+    if (KartNet_WantsLocalView()) {
+        KartNet_RenderLocalView(netSplitStart); // only this device's player, full screen
     }
 
     display_debug_info();
