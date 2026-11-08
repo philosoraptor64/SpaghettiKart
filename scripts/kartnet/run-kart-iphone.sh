@@ -6,6 +6,7 @@
 # Options (environment):
 #   FRAMES=n      quit after n netplay frames (default 0 = until you close the Mac window)
 #   MAC_BOT=seed  scripted driver on the Mac (default: Mac controller/keyboard)
+#   ROLLBACK=1    rollback netcode (n64net) instead of lockstep; WINDOW=n (8)
 #   PHONE_BOT=seed scripted driver on the phone (default: phone's controller)
 #   DELAY=n       input delay in frames (default 2)
 #   MODE, CUP, COURSE, CC, SEED, MAC_CHAR, PHONE_CHAR
@@ -36,6 +37,8 @@ cfg="$LOGS/netplay.cfg"
     echo "MK64_NET_FRAMES=$FRAMES"
     [ -n "${PHONE_BOT:-}" ] && echo "MK64_NET_BOT=$PHONE_BOT"
     [ -n "${PHONE_CHAR:-}" ] && echo "MK64_NET_CHAR=$PHONE_CHAR"
+    [ -n "${ROLLBACK:-}" ] && echo "MK64_NET_ROLLBACK=$ROLLBACK"
+    [ -n "${WINDOW:-}" ] && echo "MK64_NET_ROLLBACK_WINDOW=$WINDOW"
 } > "$cfg"
 copy_to_phone() {
     xcrun devicectl device copy to --device "$DEVICE" --domain-type appDataContainer \
@@ -47,6 +50,8 @@ host_env=(MK64_NET=1 MK64_NET_HOST=1 MK64_NET_BIND=0.0.0.0:7101 MK64_NET_DELAY="
     MK64_NET_FRAMES="$FRAMES" MK64_NET_LOG="$LOGS/mac.log")
 [ -n "${DUMP:-}" ] && host_env+=(MK64_NET_DUMP="$LOGS/mac-dump.bin")
 [ -n "${MAC_BOT:-}" ] && host_env+=(MK64_NET_BOT="$MAC_BOT")
+[ -n "${ROLLBACK:-}" ] && host_env+=(MK64_NET_ROLLBACK="$ROLLBACK")
+[ -n "${WINDOW:-}" ] && host_env+=(MK64_NET_ROLLBACK_WINDOW="$WINDOW")
 [ -n "${MAC_CHAR:-}" ] && host_env+=(MK64_NET_CHAR="$MAC_CHAR")
 [ -n "${CUP:-}" ] && host_env+=(MK64_NET_CUP="$CUP")
 [ -n "${COURSE:-}" ] && host_env+=(MK64_NET_COURSE="$COURSE")
