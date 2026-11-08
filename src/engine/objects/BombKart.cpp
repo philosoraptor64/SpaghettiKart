@@ -1,4 +1,5 @@
 #include <libultraship.h>
+#include "port/SnapshotSection.h"
 #include "engine/objects/Object.h"
 #include "BombKart.h"
 #include <vector>
@@ -29,7 +30,7 @@ extern "C" {
 extern s8 gPlayerCount;
 }
 
-size_t OBombKart::_count = 0;
+MK_SNAPSHOT_STATIC size_t OBombKart::_count = 0;
 
 OBombKart::OBombKart(const SpawnParams& params) : OObject(params) {
     Name = "Bomb Kart";

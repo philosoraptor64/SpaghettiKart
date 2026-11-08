@@ -1,4 +1,5 @@
 #include <libultraship.h>
+#include "port/SnapshotSection.h"
 #include <libultra/gbi.h>
 #include "SkySnow.h"
 #include <vector>
@@ -20,7 +21,7 @@ extern "C" {
 #include "racing/math_util.h"
 }
 
-size_t SkySnow::_count = 0;
+MK_SNAPSHOT_STATIC size_t SkySnow::_count = 0;
 
 SkySnow::SkySnow(ScreenContext* screen) : SkyActor(screen) {
     _idx = _count;

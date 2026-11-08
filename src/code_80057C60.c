@@ -140,7 +140,7 @@ UNUSED s8 D_801657B3;
 s8 D_801657B4;
 s8 D_801657B8[16];
 s8 D_801657C8;
-s8 D_801657D0[8];
+MK_SNAPSHOT_OUTSIDE s8 D_801657D0[8];
 s8 D_801657D8;
 UNUSED s16 D_801657DA[2];
 UNUSED s8 D_801657E0;
@@ -657,7 +657,7 @@ void func_80058C20(u32 arg0) {
 static const s16 sNetHud2pTimerX[2] = { 0x4B, 0xDC };
 static const s16 sNetHud2pLapX[2] = { 0x67, 0xF7 };
 static const s16 sNetHud2pRankX[2] = { 0x32, 0xC8 };
-static hud_player sNetHudSaved;
+MK_SNAPSHOT_OUTSIDE static hud_player sNetHudSaved;
 
 static void netplay_hud_push(s32 playerId) {
     hud_player* h = &playerHUD[playerId];

@@ -1,4 +1,5 @@
 #include "MoleGroup.h"
+#include "port/SnapshotSection.h"
 #include "Mole.h"
 
 extern "C" {
@@ -8,7 +9,7 @@ extern "C" {
 #include "math_util_2.h"
 }
 
-size_t OMoleGroup::_count = 0;
+MK_SNAPSHOT_STATIC size_t OMoleGroup::_count = 0;
 
 OMoleGroup::OMoleGroup(std::vector<FVector>& spawns, size_t tickRate) {
     _idx = _count;

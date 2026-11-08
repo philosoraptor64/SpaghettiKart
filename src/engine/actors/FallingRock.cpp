@@ -1,4 +1,5 @@
 #include "FallingRock.h"
+#include "port/SnapshotSection.h"
 
 #include <libultra/gbi.h>
 #include "engine/CoreMath.h"
@@ -18,7 +19,7 @@ extern "C" {
 #include "audio/external.h"
 }
 
-size_t AFallingRock::_count = 0;
+MK_SNAPSHOT_STATIC size_t AFallingRock::_count = 0;
 
 AFallingRock::AFallingRock(SpawnParams params) : AActor(params) {
     Type = ACTOR_FALLING_ROCK;

@@ -1,4 +1,5 @@
 #include "Hedgehog.h"
+#include "port/SnapshotSection.h"
 #include "engine/World.h"
 #include "port/Game.h"
 #include "port/interpolation/FrameInterpolation.h"
@@ -15,7 +16,7 @@ extern "C" {
 #include "code_80057C60.h"
 }
 
-size_t OHedgehog::_count = 0;
+MK_SNAPSHOT_STATIC size_t OHedgehog::_count = 0;
 
 OHedgehog::OHedgehog(const SpawnParams& params) : OObject(params) {
     Name = "Hedgehog";

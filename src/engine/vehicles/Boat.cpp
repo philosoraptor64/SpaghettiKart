@@ -1,4 +1,5 @@
 #include <libultraship.h>
+#include "port/SnapshotSection.h"
 #include "Boat.h"
 #include <vector>
 #include "Utils.h"
@@ -16,8 +17,8 @@ extern "C" {
 extern s8 gPlayerCount;
 }
 
-size_t ABoat::_count = 0;
-std::map<uint32_t, std::vector<uint32_t>> ABoat::BoatCounts;
+MK_SNAPSHOT_STATIC size_t ABoat::_count = 0;
+MK_SNAPSHOT_STATIC std::map<uint32_t, std::vector<uint32_t>> ABoat::BoatCounts;
 
 ABoat::ABoat(const SpawnParams& params) : AActor(params) {
     Name = "Paddle Steam Boat";

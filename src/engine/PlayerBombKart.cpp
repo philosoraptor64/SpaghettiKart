@@ -1,4 +1,5 @@
 #include "PlayerBombKart.h"
+#include "port/SnapshotSection.h"
 #include "Matrix.h"
 #include "port/interpolation/FrameInterpolation.h"
 
@@ -13,7 +14,7 @@ extern "C" {
 #include "menus.h"
 }
 
-size_t PlayerBombKart::_count = 0;
+MK_SNAPSHOT_STATIC size_t PlayerBombKart::_count = 0;
 
 PlayerBombKart::PlayerBombKart() {
     _idx = _count;

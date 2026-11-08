@@ -1,4 +1,5 @@
 #include "Snowman.h"
+#include "port/SnapshotSection.h"
 #include "engine/World.h"
 
 extern "C" {
@@ -16,7 +17,7 @@ extern "C" {
 
 static const char* sSnowmanHeadList[] = { d_course_frappe_snowland_snowman_head };
 
-size_t OSnowman::_count = 0;
+MK_SNAPSHOT_STATIC size_t OSnowman::_count = 0;
 
 OSnowman::OSnowman(const SpawnParams& params) : OObject(params) {
     Name = "Snowman";

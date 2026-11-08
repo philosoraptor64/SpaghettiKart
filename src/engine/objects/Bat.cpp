@@ -1,4 +1,5 @@
 #include "Bat.h"
+#include "port/SnapshotSection.h"
 #include "engine/World.h"
 #include "engine/CoreMath.h"
 #include "port/interpolation/FrameInterpolation.h"
@@ -18,7 +19,7 @@ extern "C" {
 
 const char* sBoardwalkTexList[] = { gTextureBat1, gTextureBat2, gTextureBat3, gTextureBat4 };
 
-size_t OBat::_count = 0;
+MK_SNAPSHOT_STATIC size_t OBat::_count = 0;
 
 OBat::OBat(const SpawnParams& params) : OObject(params) {
     Name = "Bat";

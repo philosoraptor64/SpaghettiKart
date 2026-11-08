@@ -1,4 +1,5 @@
 #include <libultraship.h>
+#include "port/SnapshotSection.h"
 #include "Car.h"
 #include <vector>
 #include "engine/vehicles/Utils.h"
@@ -18,9 +19,9 @@ extern "C" {
 extern s8 gPlayerCount;
 }
 
-size_t ACar::_count = 0;
+MK_SNAPSHOT_STATIC size_t ACar::_count = 0;
 //       pathIndex,     array of spawn points
-std::map<uint32_t, std::vector<uint32_t>> ACar::CarCounts;
+MK_SNAPSHOT_STATIC std::map<uint32_t, std::vector<uint32_t>> ACar::CarCounts;
 
 ACar::ACar(const SpawnParams& params) : AActor(params) {
     Name = "Car";

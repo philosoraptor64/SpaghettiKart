@@ -1,4 +1,5 @@
 #include "Boos.h"
+#include "port/SnapshotSection.h"
 #include "engine/World.h"
 #include "engine/CoreMath.h"
 #include "port/interpolation/FrameInterpolation.h"
@@ -23,7 +24,7 @@ extern "C" {
 #include "textures/some_data.h"
 }
 
-size_t OBoos::_count = 0;
+MK_SNAPSHOT_STATIC size_t OBoos::_count = 0;
 
 OBoos::OBoos(const SpawnParams& params) : OObject(params) {
     Name = "Boos";

@@ -31,6 +31,7 @@
 #include "port/ReplayCheck.h"
 #include "port/KartNet.h"
 #include "port/Rollback.h"
+#include "port/SimHeap.h"
 #include "player_controller.h"
 #include "render_player.h"
 #include "racing/actors.h"
@@ -104,7 +105,7 @@ OSMesgQueue gSIEventMesgQueue;
 OSMesg gSIEventMesgBuf[3];
 
 OSContStatus gControllerStatuses[4];
-OSContPad gControllerPads[4];
+MK_SNAPSHOT_OUTSIDE OSContPad gControllerPads[4];
 u8 gControllerBits;
 // Contains a 32x32 grid of indices into gCollisionIndices containing indices into gCollisionMesh
 CollisionGrid gCollisionGrid[1024];
@@ -130,7 +131,7 @@ f32 D_80150150;
 UNUSED f32 D_80150154;
 
 struct D_80150158 gD_80150158[16];
-Gfx* gDisplayListHead;
+MK_SNAPSHOT_OUTSIDE Gfx* gDisplayListHead;
 
 struct SPTask* gGfxSPTask;
 s32 D_801502A0;
@@ -140,7 +141,7 @@ MK_SNAPSHOT_OUTSIDE u16 gPortFramebuffers[3][SCREEN_WIDTH * SCREEN_HEIGHT];
 uintptr_t gPhysicalZBuffer;
 UNUSED u32 D_801502B8;
 UNUSED u32 D_801502BC;
-Mat4 sBillBoardMtx; // Faces 2D actors at the camera
+MK_SNAPSHOT_OUTSIDE Mat4 sBillBoardMtx; // Faces 2D actors at the camera
 
 s32 padding[2048];
 
@@ -183,13 +184,13 @@ s32 gModeSelection = GRAND_PRIX;
 s32 D_800DC540 = 0;
 s32 D_800DC544 = 0;
 s32 gCCSelection = CC_150;
-s32 gGlobalTimer = 0;
+MK_SNAPSHOT_OUTSIDE s32 gGlobalTimer = 0;
 UNUSED s32 D_800DC550 = 0;
 UNUSED s32 D_800DC554 = 0;
 UNUSED s32 D_800DC558 = 0;
 // Framebuffer rendering values (max 3)
-u16 sRenderedFramebuffer = 0;
-u16 sRenderingFramebuffer = 0;
+MK_SNAPSHOT_OUTSIDE u16 sRenderedFramebuffer = 0;
+MK_SNAPSHOT_OUTSIDE u16 sRenderingFramebuffer = 0;
 UNUSED u16 D_800DC564 = 0;
 s32 D_800DC568 = 0;
 s32 D_800DC56C[8] = { 0 };
@@ -312,9 +313,9 @@ void create_gfx_task_structure(void) {
 #endif
 }
 
-f32 gDeltaTime = 0.0f;
+MK_SNAPSHOT_OUTSIDE f32 gDeltaTime = 0.0f;
 void calculate_delta_time(void) {
-    static u32 prevtime = 0;
+    MK_SNAPSHOT_OUTSIDE static u32 prevtime = 0;
     u32 now = osGetCount();
     f32 deltaTime;
 
@@ -716,11 +717,14 @@ void race_logic_loop(void) {
     gMatrixObjectCount = 0;
     gMatrixEffectCount = 0;
 
+    SimHeap_Enter(); /* race logic: C++ objects live in the sim heap (rollback) */
+    KartNet_UpdateShellVisibility();
     if (gIsGamePaused != 0) {
         func_80290B14();
     }
     if (gIsInQuitToMenuTransition != 0) {
         func_802A38B4();
+        SimHeap_Leave();
         return;
     }
 
@@ -750,8 +754,10 @@ void race_logic_loop(void) {
     if (gRollbackResim) {
         /* Re-simulating for rollback: logic only. */
         CM_RunGarbageCollector();
+        SimHeap_Leave();
         return;
     }
+    SimHeap_Leave();
     profiler_log_thread5_time(LEVEL_SCRIPT_EXECUTE);
     sNumVBlanks = 0;
     gNumScreens = 0;
@@ -833,7 +839,9 @@ void race_logic_loop(void) {
     gSPEndDisplayList(gDisplayListHead++);
 
     // End of frame cleanup of actors, objects, etc.
+    SimHeap_Enter();
     CM_RunGarbageCollector();
+    SimHeap_Leave();
 }
 
 /**
@@ -1203,7 +1211,15 @@ void thread5_iteration(void) {
     // Update the gamestate if it has changed (racing, menus, credits, etc.).
     if (gGamestateNext != gGamestate) {
         gGamestate = gGamestateNext;
-        update_gamestate();
+        if (gGamestate == RACING && SimHeap_Enabled()) {
+            /* Race setup creates the World's objects: in the sim heap. */
+            Rollback_PrepareWorld();
+            SimHeap_Enter();
+            update_gamestate();
+            SimHeap_Leave();
+        } else {
+            update_gamestate();
+        }
     }
     profiler_log_thread5_time(THREAD5_START);
     config_gfx_pool();

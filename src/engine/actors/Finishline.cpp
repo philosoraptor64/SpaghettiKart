@@ -1,4 +1,5 @@
 #include <libultraship.h>
+#include "port/SnapshotSection.h"
 #include <libultra/gbi.h>
 #include "engine/CoreMath.h"
 
@@ -19,7 +20,7 @@ extern f32 gKartHopInitialVelocityTable[];
 extern f32 gKartGravityTable[];
 }
 
-size_t AFinishline::_count = 0;
+MK_SNAPSHOT_STATIC size_t AFinishline::_count = 0;
 
 AFinishline::AFinishline(const SpawnParams& params) : AActor(params) {
     Name = "Finishline";

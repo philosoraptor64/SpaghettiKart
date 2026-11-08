@@ -1,5 +1,6 @@
 
 #include <libultraship.h>
+#include "port/SnapshotSection.h"
 #include <libultra/gbi.h>
 #include "Train.h"
 #include <vector>
@@ -28,9 +29,9 @@ extern "C" {
 }
 
 // The two counts are so we can spawn trains at specific points or use auto distribution
-size_t ATrain::_count = 0;
+MK_SNAPSHOT_STATIC size_t ATrain::_count = 0;
 //       pathIndex,     array of spawn points
-std::map<uint32_t, std::vector<uint32_t>> ATrain::TrainCounts;
+MK_SNAPSHOT_STATIC std::map<uint32_t, std::vector<uint32_t>> ATrain::TrainCounts;
 
 ATrain::ATrain(const SpawnParams& params) : AActor(params) {
     Name = "Train";

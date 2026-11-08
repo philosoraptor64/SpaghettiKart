@@ -1,4 +1,5 @@
 #include <iostream>
+#include "port/SnapshotSection.h"
 #include <libultraship/libultraship.h>
 #include <libultra/gbi.h>
 #include "../CoreMath.h"
@@ -29,7 +30,7 @@ extern "C" {
 
 namespace TrackEditor {
 
-size_t LightObject::NumLights = 0;
+MK_SNAPSHOT_STATIC size_t LightObject::NumLights = 0;
 
     LightObject::LightObject(const char* name, FVector* pos, s8* direction) {
         Name = name;

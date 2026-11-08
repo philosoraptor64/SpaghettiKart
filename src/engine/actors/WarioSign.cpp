@@ -1,4 +1,5 @@
 #include "WarioSign.h"
+#include "port/SnapshotSection.h"
 
 #include <libultra/gbi.h>
 #include <assets/models/tracks/wario_stadium/wario_stadium_data.h>
@@ -13,7 +14,7 @@ extern "C" {
 #include "racing/collision.h"
 }
 
-size_t AWarioSign::_count = 0;
+MK_SNAPSHOT_STATIC size_t AWarioSign::_count = 0;
 
 AWarioSign::AWarioSign(const SpawnParams& params) : AActor(params) {
     Type = ACTOR_WARIO_SIGN;

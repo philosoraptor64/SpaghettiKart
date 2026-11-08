@@ -19,12 +19,15 @@
 #define MK_SNAPSHOT_SUPPORTED 1
 #define MK_SNAPSHOT_SEGMENT "__MKSNAP"
 #define MK_SNAPSHOT_OUTSIDE __attribute__((section("__DATA,__bss")))
+/* C++ engine statics that belong to the simulation (counters, vehicle maps). */
+#define MK_SNAPSHOT_STATIC __attribute__((section("__MKSNAP,__data")))
 #if !defined(MK_SNAPSHOT_EXCLUDE) && !defined(__cplusplus)
 #pragma clang section bss = "__MKSNAP,__bss" data = "__MKSNAP,__data"
 #endif
 #else
 #define MK_SNAPSHOT_SUPPORTED 0
 #define MK_SNAPSHOT_OUTSIDE
+#define MK_SNAPSHOT_STATIC
 #endif
 
 #endif

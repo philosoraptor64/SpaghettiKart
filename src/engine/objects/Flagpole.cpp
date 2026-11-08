@@ -1,4 +1,5 @@
 #include "Flagpole.h"
+#include "port/SnapshotSection.h"
 #include "engine/World.h"
 #include "port/interpolation/FrameInterpolation.h"
 
@@ -15,7 +16,7 @@ extern "C" {
 #include "course_offsets.h"
 }
 
-size_t OFlagpole::_count = 0;
+MK_SNAPSHOT_STATIC size_t OFlagpole::_count = 0;
 
 OFlagpole::OFlagpole(const SpawnParams& params) : OObject(params) {
     Name = "Flagpole";

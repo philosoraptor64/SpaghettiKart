@@ -1,4 +1,5 @@
 #include "GrandPrixBalloons.h"
+#include "port/SnapshotSection.h"
 
 #include "port/Game.h"
 #include "assets/textures/other_textures.h"
@@ -16,7 +17,7 @@ extern "C" {
 #include "menus.h"
 }
 
-size_t OGrandPrixBalloons::_count = 0;
+MK_SNAPSHOT_STATIC size_t OGrandPrixBalloons::_count = 0;
 
 OGrandPrixBalloons::OGrandPrixBalloons(const SpawnParams& params) : OObject(params) {
     Name = "Grand Prix Balloons";

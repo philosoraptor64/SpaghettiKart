@@ -1,4 +1,5 @@
 #include <libultraship.h>
+#include "port/SnapshotSection.h"
 #include "Bus.h"
 #include <vector>
 #include "engine/vehicles/Utils.h"
@@ -18,8 +19,8 @@ extern "C" {
 extern s8 gPlayerCount;
 }
 
-size_t ABus::_count = 0;
-std::map<uint32_t, std::vector<uint32_t>> ABus::BusCounts;
+MK_SNAPSHOT_STATIC size_t ABus::_count = 0;
+MK_SNAPSHOT_STATIC std::map<uint32_t, std::vector<uint32_t>> ABus::BusCounts;
 
 ABus::ABus(const SpawnParams& params) : AActor(params) {
     Name = "Bus";

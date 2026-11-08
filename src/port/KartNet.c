@@ -26,6 +26,10 @@
 #include "port/RaceStart.h"
 #include "spawn_players.h"
 #include "objects.h"
+#include "camera.h"
+#include "actor_types.h"
+#include "racing/math_util.h"
+#include "port/Game.h"
 #include "menu_items.h"
 #include "port/Rollback.h"
 #include <SDL2/SDL.h>
@@ -1053,6 +1057,34 @@ static unsigned long long HashPlayers(unsigned long long h) {
     memcpy(sHashCopy, gPlayers, sizeof(sHashCopy));
     MaskDrawingFields(sHashCopy);
     return Fnv1a(h, sHashCopy, sizeof(sHashCopy));
+}
+
+/* Shells' "drawn on screen N" bits (actor flags 0xF, set by the drawing code
+ * in actors.c actor_rendered) are read by race logic: a triple green shell
+ * whose timer ran out is destroyed only if no screen shows it. In netplay
+ * each device draws only its own screen, so the bits would differ between the
+ * devices (and re-simulated frames draw nothing). Recompute them at the start
+ * of every race frame from both players' cameras, exactly as the drawing code
+ * tests them, so they are the same everywhere. */
+void KartNet_UpdateShellVisibility(void) {
+    if (!KartNet_IsActive()) {
+        return;
+    }
+    size_t n = CM_GetActorSize();
+    for (size_t i = 0; i < n; i++) {
+        struct Actor* a = CM_GetActor(i);
+        if (a->type != ACTOR_GREEN_SHELL && a->type != ACTOR_RED_SHELL && a->type != ACTOR_BLUE_SPINY_SHELL) {
+            continue;
+        }
+        s16 flags = (s16) (a->flags & ~0xF);
+        for (int s = 0; s < gPlayerCount && s < 4; s++) {
+            Camera* c = &camera1[s];
+            if (is_within_render_distance(c->pos, a->pos, c->rot[1], 0, c->fieldOfView, 490000.0f) >= 0.0f) {
+                flags |= (s16) (1 << s);
+            }
+        }
+        a->flags = flags;
+    }
 }
 
 /* Zero the Player fields that only drawing writes (a copy of gPlayers). */

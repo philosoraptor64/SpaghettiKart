@@ -1,4 +1,5 @@
 #include <libultraship.h>
+#include "port/SnapshotSection.h"
 #include <libultra/gbi.h>
 #include "Penguin.h"
 #include <vector>
@@ -365,7 +366,7 @@ void OPenguin::OtherPenguin(s32 objectIndex) {
     }
 }
 
-bool OPenguin::_toggle = false;
+MK_SNAPSHOT_STATIC bool OPenguin::_toggle = false;
 
 void OPenguin::InitOtherPenguin(s32 objectIndex) {
     Object* object;

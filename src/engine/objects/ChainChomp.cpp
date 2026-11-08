@@ -1,4 +1,5 @@
 #include "ChainChomp.h"
+#include "port/SnapshotSection.h"
 #include "engine/World.h"
 #include "port/interpolation/FrameInterpolation.h"
 
@@ -18,7 +19,7 @@ extern "C" {
 #include "course_offsets.h"
 }
 
-size_t OChainChomp::_count = 0;
+MK_SNAPSHOT_STATIC size_t OChainChomp::_count = 0;
 
 OChainChomp::OChainChomp() {
     Name = "Chain Chomp";

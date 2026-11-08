@@ -1,4 +1,5 @@
 #include <libultraship.h>
+#include "port/SnapshotSection.h"
 #include <libultra/gbi.h>
 #include "Seagull.h"
 #include <vector>
@@ -32,7 +33,7 @@ extern SplineData D_800E6280;
 
 SplineData* D_800E633C[] = { &D_800E6034, &D_800E60F0, &D_800E61B4, &D_800E6280 };
 
-size_t OSeagull::_count = 0;
+MK_SNAPSHOT_STATIC size_t OSeagull::_count = 0;
 
 OSeagull::OSeagull(const SpawnParams& params) : OObject(params) {
     Name = "Seagull";

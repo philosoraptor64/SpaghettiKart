@@ -1,4 +1,5 @@
 #include <libultraship.h>
+#include "port/SnapshotSection.h"
 #include <libultra/gbi.h>
 #include "Thwomp.h"
 #include <vector>
@@ -49,8 +50,8 @@ f32 D_800E594C[][2] = {
 
 s16 D_800E597C[] = { 0x0000, 0x0000, 0x4000, 0x8000, 0x8000, 0xc000 };
 
-size_t OThwomp::_count = 0;
-size_t OThwomp::_rand = 0;
+MK_SNAPSHOT_STATIC size_t OThwomp::_count = 0;
+MK_SNAPSHOT_STATIC size_t OThwomp::_rand = 0;
 
 OThwomp::OThwomp(const SpawnParams& params) : OObject(params) { // s16 x, s16 z, s16 direction, f32 scale, s16 behaviour, s16 primAlpha, u16 boundingBoxSize) {
     FVector loc = params.Location.value_or(FVector{0, 0, 0});

@@ -1,4 +1,5 @@
 #include <libultraship.h>
+#include "port/SnapshotSection.h"
 #include <libultra/gbi.h>
 #include <vector>
 
@@ -21,7 +22,7 @@ extern "C" {
 #include "code_80005FD0.h"
 }
 
-size_t AText::_count;
+MK_SNAPSHOT_STATIC size_t AText::_count;
 
 AText::AText(const SpawnParams& params) : AActor(params) {
     Name = "Text";

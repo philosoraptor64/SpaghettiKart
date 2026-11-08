@@ -1,4 +1,5 @@
 #include "MarioSign.h"
+#include "port/SnapshotSection.h"
 
 #include <libultra/gbi.h>
 #include <assets/models/tracks/mario_raceway/mario_raceway_data.h>
@@ -14,7 +15,7 @@ extern "C" {
 #include "racing/collision.h"
 }
 
-size_t AMarioSign::_count = 0;
+MK_SNAPSHOT_STATIC size_t AMarioSign::_count = 0;
 
 AMarioSign::AMarioSign(const SpawnParams& params) : AActor(params) {
     Name = "Mario Sign";

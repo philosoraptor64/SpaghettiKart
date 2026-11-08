@@ -17,6 +17,8 @@
 #include "Rollback.h"
 #include "port/Game.h"
 #include "engine/World.h"
+#include "engine/sky/Sky.h"
+#include "port/SimHeap.h"
 
 #include <libultraship.h>
 #include <algorithm>
@@ -31,6 +33,7 @@
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include <mach-o/dyld.h>
+#include <dlfcn.h>
 #endif
 
 extern "C" {
@@ -42,6 +45,8 @@ extern uintptr_t sPoolEnd;
 extern OSContPad gControllerPads[4];
 #include "port/KartNet.h"
 #include "buffers.h"
+#include "objects.h"
+#include "render_player.h"
 void rollback_sim_frame(void); /* main.c */
 }
 
@@ -54,7 +59,7 @@ struct Region {
 };
 
 struct Snapshot {
-    std::vector<uint8_t> data, bss, pool;
+    std::vector<uint8_t> data, bss, pool, heap, roots;
     uintptr_t poolUsed = 0;
     bool valid = false;
 };
@@ -83,12 +88,48 @@ uintptr_t PoolStart() {
     return sPoolEnd - 0x10000000;
 }
 
+/* The C++ simulation's roots outside the sim heap: the World's containers and
+ * other race members (their headers; everything they own is in the sim heap),
+ * and the sky's actor list. Not the whole World: it also holds render
+ * matrices that drawing changes mid-frame. */
+struct Root {
+    void* p;
+    size_t n;
+};
+std::vector<Root> Roots() {
+    World* w = GetWorld();
+    std::vector<Root> r = {
+        { &w->Actors, sizeof(w->Actors) },
+        { &w->Objects, sizeof(w->Objects) },
+        { &w->Emitters, sizeof(w->Emitters) },
+        { &w->StaticMeshActors, sizeof(w->StaticMeshActors) },
+        { &w->Lakitus, sizeof(w->Lakitus) },
+        { &w->Crossings, sizeof(w->Crossings) },
+        { &w->Cameras, sizeof(w->Cameras) },
+        { &w->mPlayerBombKart, sizeof(w->mPlayerBombKart) },
+    };
+    if (Sky::Instance) {
+        r.push_back({ &Sky::Instance->GetSkyActors(), sizeof(std::vector<std::unique_ptr<SkyActor>>) });
+    }
+    return r;
+}
+
 void Save(Snapshot& s) {
+    int scope = SimHeap_Suspend(); /* the snapshot buffers themselves: system heap */
     s.data.assign(sData.base, sData.base + sData.size);
     s.bss.assign(sBss.base, sBss.base + sBss.size);
     s.poolUsed = gNextFreeMemoryAddress - PoolStart();
     s.pool.assign((uint8_t*) PoolStart(), (uint8_t*) PoolStart() + s.poolUsed);
+    uint8_t* hb = (uint8_t*) SimHeap_Base();
+    if (hb) {
+        s.heap.assign(hb, hb + SimHeap_Used());
+    }
+    s.roots.clear();
+    for (const Root& r : Roots()) {
+        s.roots.insert(s.roots.end(), (uint8_t*) r.p, (uint8_t*) r.p + r.n);
+    }
     s.valid = true;
+    SimHeap_Resume(scope);
 }
 
 void Load(const Snapshot& s) {
@@ -97,6 +138,17 @@ void Load(const Snapshot& s) {
     /* Memory handed out after the snapshot is simply forgotten: the cursor
      * (in __MKSNAP) goes back with the rest. */
     memcpy((void*) PoolStart(), s.pool.data(), s.pool.size());
+    uint8_t* hb = (uint8_t*) SimHeap_Base();
+    if (hb && !s.heap.empty()) {
+        memcpy(hb, s.heap.data(), s.heap.size()); /* bookkeeping included: later blocks become free again */
+    }
+    size_t off = 0;
+    for (const Root& r : Roots()) {
+        if (off + r.n <= s.roots.size()) {
+            memcpy(r.p, s.roots.data() + off, r.n);
+        }
+        off += r.n;
+    }
 }
 
 /* ---- SyncTest ---- */
@@ -108,6 +160,7 @@ struct Frame {
 };
 
 int sSyncTestN = 0;
+long sSyncTestFrom = 0; /* MK64_SYNCTEST_FROM: first frame to check */
 std::vector<Frame> sRing;
 long sTick = -1;   /* frame being run, -1 = not in a race */
 FILE* sLog = nullptr;
@@ -150,7 +203,24 @@ size_t Compare(const char* name, const std::vector<uint8_t>& a, const std::vecto
         bad += i - start;
         if (sReportBudget > 0) {
             sReportBudget--;
-            LogLine("  %s +0x%zx (addr 0x%lx) %zu bytes", name, start, (unsigned long) (base + start), i - start);
+            char what[256] = "";
+            void* payload;
+            size_t psize;
+            if (strcmp(name, "heap") == 0 && SimHeap_BlockOf((void*) (base + start), &payload, &psize)) {
+                /* name the object by its vtable, if it has one */
+                Dl_info info;
+                void* vptr = *(void**) payload;
+                const char* cls = (dladdr(vptr, &info) && info.dli_sname) ? info.dli_sname : "?";
+                snprintf(what, sizeof(what), " in block %p (+0x%lx of %zu bytes, vtable %s)", payload,
+                         (unsigned long) ((base + start) - (uintptr_t) payload), psize, cls);
+            }
+            uintptr_t addr = base + start;
+            if (addr >= (uintptr_t) gObjectList && addr < (uintptr_t) gObjectList + sizeof(Object) * OBJECT_LIST_SIZE) {
+                size_t idx = (addr - (uintptr_t) gObjectList) / sizeof(Object);
+                snprintf(what, sizeof(what), " gObjectList[%zu]+0x%zx (sizeof %zu)", idx,
+                         (size_t) (addr - (uintptr_t) &gObjectList[idx]), sizeof(Object));
+            }
+            LogLine("  %s +0x%zx (addr 0x%lx) %zu bytes%s", name, start, (unsigned long) addr, i - start, what);
         }
     }
     if (a.size() != b.size()) {
@@ -174,6 +244,31 @@ void MaskDrawingState(Snapshot& s) {
             memset(buf.data() + (a - b), 0, n);
         }
     };
+    /* Camera view matrices: computed while drawing. */
+    uint8_t* hb = (uint8_t*) SimHeap_Base();
+    if (hb) {
+        for (auto& cam : GetWorld()->Cameras) {
+            for (Mtx* m : { cam->GetPerspMatrix(), cam->GetLookAtMatrix() }) {
+                uintptr_t off = (uintptr_t) m - (uintptr_t) hb;
+                if ((uintptr_t) m >= (uintptr_t) hb && off + sizeof(Mtx) <= s.heap.size()) {
+                    memset(s.heap.data() + off, 0, sizeof(Mtx));
+                }
+            }
+        }
+    }
+    /* Actors' "drawn on screen N" flag bits (0xF): written by drawing; the
+     * shells' copy that race logic reads is recomputed each frame
+     * (KartNet_UpdateShellVisibility). */
+    if (hb) {
+        size_t n = CM_GetActorSize();
+        for (size_t i = 0; i < n; i++) {
+            struct Actor* a = CM_GetActor(i);
+            uintptr_t off = (uintptr_t) &a->flags - (uintptr_t) hb;
+            if ((uintptr_t) &a->flags >= (uintptr_t) hb && off + sizeof(a->flags) <= s.heap.size()) {
+                s.heap[off] &= 0xF0; /* little endian: low byte holds bits 0-7 */
+            }
+        }
+    }
     for (auto* r : { &s.data, &s.bss }) {
         uint8_t* base = (r == &s.data) ? sData.base : sBss.base;
         maskIn(*r, base, gPlayers, sizeof(Player) * NUM_PLAYERS, true);
@@ -181,6 +276,14 @@ void MaskDrawingState(Snapshot& s) {
         maskIn(*r, base, &D_802BFB80, sizeof(D_802BFB80), false);
         maskIn(*r, base, gEncodedKartTexture, sizeof(gEncodedKartTexture[0]) * 2, false);
         maskIn(*r, base, gPlayerPalettesList, sizeof(gPlayerPalettesList), false);
+        maskIn(*r, base, gPlayersToRenderScreenId, sizeof(s16) * 8, false);
+        /* Lakitu faces the camera: OLakitu::Draw sets its orientation. */
+        for (int i = 0; i < 4; i++) {
+            s32 idx = gIndexLakituList[i];
+            if (idx > 0 && idx < OBJECT_LIST_SIZE) {
+                maskIn(*r, base, &gObjectList[idx].orientation, sizeof(gObjectList[idx].orientation), false);
+            }
+        }
     }
 }
 
@@ -198,6 +301,24 @@ extern "C" {
 
 int gRollbackResim = 0;
 
+/* Race setup is about to run in the sim heap: give the World's containers
+ * fresh (empty) storage there, so nothing they own is on the system heap. */
+void Rollback_PrepareWorld(void) {
+    World* w = GetWorld();
+    SimHeap_Enter();
+    decltype(w->Actors)().swap(w->Actors);
+    decltype(w->Objects)().swap(w->Objects);
+    decltype(w->Emitters)().swap(w->Emitters);
+    decltype(w->StaticMeshActors)().swap(w->StaticMeshActors);
+    decltype(w->Lakitus)().swap(w->Lakitus);
+    decltype(w->Crossings)().swap(w->Crossings);
+    decltype(w->Cameras)().swap(w->Cameras);
+    if (Sky::Instance) {
+        std::vector<std::unique_ptr<SkyActor>>().swap(Sky::Instance->GetSkyActors());
+    }
+    SimHeap_Leave();
+}
+
 int Rollback_Supported(void) {
     FindSections();
     return sSupported;
@@ -209,6 +330,8 @@ void Rollback_SyncTestInit(const char* logPath) {
         sSyncTestN = 0;
         return;
     }
+    SimHeap_Enable();
+    sSyncTestFrom = getenv("MK64_SYNCTEST_FROM") ? strtol(getenv("MK64_SYNCTEST_FROM"), nullptr, 0) : 0;
     sRing.resize((size_t) sSyncTestN + 1);
     if (logPath && *logPath) {
         sLog = fopen(logPath, "w");
@@ -247,7 +370,7 @@ void Rollback_SyncTestRecordInput(void) {
 
 /* End of frame `tick` (logic and drawing done). */
 void Rollback_SyncTestEndFrame(void) {
-    if (sSyncTestN <= 0 || sTick < sSyncTestN) {
+    if (sSyncTestN <= 0 || sTick < sSyncTestN || sTick < sSyncTestFrom) {
         return;
     }
     long from = sTick - sSyncTestN + 1;
@@ -256,6 +379,18 @@ void Rollback_SyncTestEndFrame(void) {
         return;
     }
     static Snapshot real, resim;
+    auto dumpSky = [](const char* when) {
+        if (!getenv("MK64_SYNCTEST_DEBUG") || !Sky::Instance) return;
+        auto& v = Sky::Instance->GetSkyActors();
+        LogLine("  sky %s: %zu actors data %p", when, v.size(), (void*) v.data());
+        for (size_t i = 0; i < v.size() && i < 3; i++) {
+            ScreenContext* sc = v[i]->mScreen;
+            LogLine("    [%zu] %p screen %p camera %p", i, (void*) v[i].get(), (void*) sc, sc ? (void*) sc->camera : nullptr);
+        }
+        LogLine("    screens cam %p %p %p %p", (void*) gScreenContexts[0].camera, (void*) gScreenContexts[1].camera,
+                (void*) gScreenContexts[2].camera, (void*) gScreenContexts[3].camera);
+    };
+    dumpSky("before");
     Save(real);
     WorldCounts realCounts = CountWorld();
     double t0 = NowMs();
@@ -272,7 +407,12 @@ void Rollback_SyncTestEndFrame(void) {
     sResimMs += NowMs() - t0;
     Save(resim);
     WorldCounts resimCounts = CountWorld();
+    /* Continue from the state the normal frames produced (before masking the
+     * copies for the comparison below). */
+    Load(real);
+    dumpSky("after restore");
     sChecks++;
+    sReportBudget = (sMismatches < 60) ? 12 : 0; /* lines per mismatching frame */
     MaskDrawingState(real);
     MaskDrawingState(resim);
     if (memcmp(&realCounts, &resimCounts, sizeof(realCounts)) != 0 && sReportBudget > 0) {
@@ -283,15 +423,16 @@ void Rollback_SyncTestEndFrame(void) {
     }
     size_t bad = Compare("data", real.data, resim.data, (uintptr_t) sData.base) +
                  Compare("bss", real.bss, resim.bss, (uintptr_t) sBss.base) +
-                 Compare("pool", real.pool, resim.pool, PoolStart());
+                 Compare("pool", real.pool, resim.pool, PoolStart()) +
+                 Compare("heap", real.heap, resim.heap, (uintptr_t) SimHeap_Base()) +
+                 Compare("roots", real.roots, resim.roots, 0);
     if (bad) {
         sMismatches++;
         if (sMismatches <= 20 || sMismatches % 100 == 0) {
             LogLine("MISMATCH after frame %ld (resim from %ld): %zu bytes", sTick, from, bad);
         }
     }
-    /* Continue from the state the normal frames produced. */
-    Load(real);
+    dumpSky("after resim");
     if (sChecks % 300 == 0) {
         LogLine("synctest frame %ld: %lu checks, %lu mismatches; save %.2f ms, resim of %d frames %.2f ms (avg)",
                 sTick, sChecks, sMismatches, sSaveMs / (double) (sChecks + sSyncTestN), sSyncTestN,

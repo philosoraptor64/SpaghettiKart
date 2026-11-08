@@ -51,6 +51,8 @@ int KartNet_WantsLocalView(void);
 int KartNet_LocalPlayer(void); /* 0 host, 1 guest */
 void KartNet_RenderLocalView(void* splitStart); /* a Gfx* */
 int KartNet_SkipSplitRender(void);
+/* Start of each race frame: deterministic "shell on screen" bits (netplay). */
+void KartNet_UpdateShellVisibility(void);
 /* Zero the drawing-only fields in a copy of gPlayers (sync hash, SyncTest). */
 void KartNet_MaskDrawingFields(void* players); /* MK64_NET_VIEW=single experiment */
 

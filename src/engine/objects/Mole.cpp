@@ -1,4 +1,5 @@
 #include <libultraship.h>
+#include "port/SnapshotSection.h"
 #include <libultra/gbi.h>
 #include "Mole.h"
 #include "port/interpolation/FrameInterpolation.h"
@@ -25,7 +26,7 @@ extern "C" {
 #include <assets/models/common_data.h>
 }
 
-size_t OMole::_count = 0;
+MK_SNAPSHOT_STATIC size_t OMole::_count = 0;
 
 OMole::OMole(FVector pos, OMoleGroup* group) {
     Name = "Mole";

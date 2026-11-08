@@ -1,4 +1,5 @@
 #include <libultraship.h>
+#include "port/SnapshotSection.h"
 #include <libultra/gbi.h>
 #include "SkyStar.h"
 #include <vector>
@@ -19,7 +20,7 @@ extern "C" {
 #include "render_objects.h"
 }
 
-size_t SkyStar::_count = 0;
+MK_SNAPSHOT_STATIC size_t SkyStar::_count = 0;
 
 SkyStar::SkyStar(ScreenContext* screen, u16 cloudVariant, u16 posY, u16 rotY, u16 scalePercent) : SkyActor(screen) {
     _idx = _count;

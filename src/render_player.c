@@ -43,13 +43,14 @@ s32 gPlayersToRenderCount = 0;
 // Can't find anything that actually references these...
 UNUSED void* D_800DDB5C[3] = { gFramebuffer0, gFramebuffer1, gFramebuffer2 };
 
-s16 gPlayersToRenderPlayerId[8];
+MK_SNAPSHOT_OUTSIDE s16 gPlayersToRenderPlayerId[8];
+/* stays in place (something writes past its end; moving it crashed): masked in SyncTest */
 s16 gPlayersToRenderScreenId[8];
-Player* gPlayersToRenderPlayer[8];
+MK_SNAPSHOT_OUTSIDE Player* gPlayersToRenderPlayer[8];
 s16 gMatrixEffectCount;
 s32 D_80164AF4[3];
 struct_D_802F1F80* gPlayerPalette;
-static const char* sKartTexture;
+MK_SNAPSHOT_OUTSIDE static const char* sKartTexture;
 u16 gPlayerRedEffect[8];
 u16 gPlayerGreenEffect[8];
 u16 gPlayerBlueEffect[8];
@@ -61,11 +62,11 @@ UNUSED u16 gPlayerWhiteEffect[8];
 s32 D_80164B80[296];
 s16 D_80165020[40];
 Vec3f gPlayerLastVelocity[8];
-s16 gLastAnimFrameSelector[4][8];
-s16 gLastAnimGroupSelector[4][8];
-s16 D_80165150[4][8];
-s16 D_80165190[4][8];
-s16 D_801651D0[4][8];
+MK_SNAPSHOT_OUTSIDE s16 gLastAnimFrameSelector[4][8];
+MK_SNAPSHOT_OUTSIDE s16 gLastAnimGroupSelector[4][8];
+MK_SNAPSHOT_OUTSIDE s16 D_80165150[4][8];
+MK_SNAPSHOT_OUTSIDE s16 D_80165190[4][8];
+MK_SNAPSHOT_OUTSIDE s16 D_801651D0[4][8];
 
 void func_8001F980(s32* arg0, s32* arg1) {
     if ((gDemoMode == 1) || (D_80164A28 != 0) || (D_8015F894 != 0)) {

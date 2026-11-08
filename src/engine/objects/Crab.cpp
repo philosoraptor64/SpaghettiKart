@@ -1,4 +1,5 @@
 #include <libultraship.h>
+#include "port/SnapshotSection.h"
 #include <libultra/gbi.h>
 #include "Crab.h"
 #include <vector>
@@ -27,7 +28,7 @@ extern "C" {
 #include "assets/models/common_data.h"
 }
 
-size_t OCrab::_count = 0;
+MK_SNAPSHOT_STATIC size_t OCrab::_count = 0;
 
 OCrab::OCrab(const SpawnParams& params) : OObject(params) {
     Name = "Crab";

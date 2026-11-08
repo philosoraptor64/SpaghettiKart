@@ -1,4 +1,5 @@
 #include "BowserStatue.h"
+#include "port/SnapshotSection.h"
 
 #include <libultra/gbi.h>
 #include "engine/Matrix.h"
@@ -14,7 +15,7 @@ extern "C" {
 Vtx gBowserStatueVtx[717];
 Gfx gBowserStatueGfx[162];
 
-size_t ABowserStatue::_count = 0;
+MK_SNAPSHOT_STATIC size_t ABowserStatue::_count = 0;
 
 ABowserStatue::ABowserStatue(const SpawnParams& params) {
     Name = "Bowser Statue";

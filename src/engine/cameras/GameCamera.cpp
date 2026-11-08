@@ -1,4 +1,5 @@
 #include <libultraship.h>
+#include "port/SnapshotSection.h"
 #include <libultra/gbi.h>
 #include "GameCamera.h"
 #include "port/interpolation/FrameInterpolation.h"
@@ -11,7 +12,7 @@ extern "C" {
 #include "camera.h"
 }
 
-size_t GameCamera::_count = 0;
+MK_SNAPSHOT_STATIC size_t GameCamera::_count = 0;
 
 GameCamera::GameCamera() {
     _camera = &cameras[_count];

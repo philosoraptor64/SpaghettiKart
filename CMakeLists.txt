@@ -149,7 +149,7 @@ if(APPLE AND CMAKE_C_COMPILER_ID MATCHES "Clang")
     $<$<COMPILE_LANGUAGE:C>:-include>
     "$<$<COMPILE_LANGUAGE:C>:${CMAKE_CURRENT_SOURCE_DIR}/src/port/SnapshotSection.h>")
   file(GLOB MK_SNAPSHOT_EXCLUDED "src/audio/*.c" "src/buffers/audio_heap.c")
-  list(APPEND MK_SNAPSHOT_EXCLUDED src/port/KartNet.c src/port/ReplayCheck.c)
+  list(APPEND MK_SNAPSHOT_EXCLUDED src/port/KartNet.c src/port/ReplayCheck.c src/profiler.c)
   set_source_files_properties(${MK_SNAPSHOT_EXCLUDED} PROPERTIES COMPILE_DEFINITIONS MK_SNAPSHOT_EXCLUDE=1)
 endif()
 
