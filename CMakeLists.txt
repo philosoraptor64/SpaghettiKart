@@ -33,8 +33,14 @@ if(IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
   set(SPAGHETTIKART_IOS ON)
   set(PLATFORM "OS64")
   include(cmake/ios.toolchain.cmake)
-  set(CMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "YOUR_TEAM_ID")
-  set(PROJECT_ID "dev.net64.game")
+  # Sign with your own Apple team: -DSPAGHETTIKART_IOS_TEAM=XXXXXXXXXX (or pass
+  # DEVELOPMENT_TEAM=... to xcodebuild).
+  set(SPAGHETTIKART_IOS_TEAM "" CACHE STRING "Apple development team ID for iOS signing")
+  set(SPAGHETTIKART_IOS_BUNDLE_ID "io.github.philosoraptor.spaghettikart" CACHE STRING "iOS bundle identifier")
+  if(SPAGHETTIKART_IOS_TEAM)
+    set(CMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "${SPAGHETTIKART_IOS_TEAM}")
+  endif()
+  set(PROJECT_ID "${SPAGHETTIKART_IOS_BUNDLE_ID}")
 endif()
 
 # Toggle for GLES (Required for many ARM/Mobile platforms)
@@ -116,14 +122,13 @@ list(FILTER ALL_FILES EXCLUDE REGEX ".*.inc.c")
 list(FILTER ALL_FILES EXCLUDE REGEX "./src/debug/crash_screen_enhancement.c")
 
 if(SPAGHETTIKART_IOS)
-  set(IOS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/libultraship/ios)
-
-  set(STORYBOARD_FILE ${IOS_DIR}/Launch.storyboard)
-  set(IMAGE_FILES ${IOS_DIR}/PoweredBy.png)
-  set(ICON_FILES ${IOS_DIR}/Icon.png)
-
-  list(APPEND ALL_FILES ${STORYBOARD_FILE} ${IMAGE_FILES} ${ICON_FILES})
-
+  # The old libultraship/ios folder (storyboard, plist) no longer exists; the
+  # app uses ios/Info.plist.in (UIScene manifest, UILaunchScreen) instead.
+  # Game data (mk64.o2r, spaghetti.o2r) lives in the app's Documents folder,
+  # which is where libultraship looks on iOS; nothing ROM-derived is bundled.
+  set(IOS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ios)
+  set(ICON_FILES ${CMAKE_CURRENT_SOURCE_DIR}/icon.png)
+  list(APPEND ALL_FILES ${ICON_FILES})
 endif()
 
 add_executable(${PROJECT_NAME} ${ALL_FILES})
@@ -141,8 +146,12 @@ if(SPAGHETTIKART_IOS)
   set_target_properties(
     ${PROJECT_NAME}
     PROPERTIES MACOSX_BUNDLE TRUE
-               MACOSX_BUNDLE_INFO_PLIST ${IOS_DIR}/plist.in
-               RESOURCE "${IMAGE_FILES};${STORYBOARD_FILE};${ICON_FILES}")
+               MACOSX_BUNDLE_INFO_PLIST ${IOS_DIR}/Info.plist.in
+               MACOSX_BUNDLE_GUI_IDENTIFIER ${PROJECT_ID}
+               MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
+               MACOSX_BUNDLE_BUNDLE_VERSION "1"
+               RESOURCE "${ICON_FILES}"
+               XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2")
 endif()
 
 include(cmake/SetFlags.cmake)
@@ -219,7 +228,7 @@ add_custom_command(
   VERBATIM)
 endif()
 
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND NOT SPAGHETTIKART_IOS)
   include(ExternalProject)
   # Torch's pinned spdlog bundles an fmt that trips a consteval error under
   # newer AppleClang (Xcode 16+): "call to consteval function

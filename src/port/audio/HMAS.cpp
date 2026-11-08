@@ -1,6 +1,11 @@
 #include "HMAS.h"
 
 #define MINIAUDIO_IMPLEMENTATION
+#if defined(PLATFORM_IOS)
+// The engine runs with noDevice (it only mixes/decodes), so drop miniaudio's
+// device backends on iOS: they include AVFoundation, which needs Objective-C.
+#define MA_NO_DEVICE_IO
+#endif
 #include "audio/miniaudio.h"
 #include <spdlog/spdlog.h>
 #include "port/Engine.h"

@@ -1049,6 +1049,11 @@ extern "C"
     // overwrite=0 keeps any SHIP_HOME the user already set.
     setenv("SHIP_HOME", "~/Library/Application Support/SpaghettiKart", 0);
 #endif
+#if defined(PLATFORM_IOS)
+    // SDL exposes the iPhone's accelerometer as a joystick, and libultraship
+    // merges it into player 1's stick: tilting the phone would steer.
+    SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0");
+#endif
     // load_wasm();
     GameEngine::Create();
     audio_init();

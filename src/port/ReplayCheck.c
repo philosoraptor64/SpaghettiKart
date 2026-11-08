@@ -46,9 +46,25 @@ static long EnvInt(const char* name, long def) {
     return (v && *v) ? strtol(v, NULL, 0) : def;
 }
 
+/* iOS apps start in "/", so relative paths are taken from the app's Documents
+ * folder there (where devicectl copies files in and out). */
+static const char* ResolvePath(const char* path) {
+#if defined(PLATFORM_IOS)
+    static char buf[4][1024];
+    static int next = 0;
+    const char* home = getenv("HOME");
+    if (path != NULL && *path != '\0' && path[0] != '/' && home != NULL) {
+        char* out = buf[next++ & 3];
+        snprintf(out, sizeof(buf[0]), "%s/Documents/%s", home, path);
+        return out;
+    }
+#endif
+    return path;
+}
+
 static void Init(void) {
     sInitDone = 1;
-    const char* path = getenv("MK64_REPLAY_CHECK");
+    const char* path = ResolvePath(getenv("MK64_REPLAY_CHECK"));
     if (path == NULL || *path == '\0') {
         return;
     }
@@ -67,8 +83,8 @@ static void Init(void) {
     sChar = (int) EnvInt("MK64_REPLAY_CHAR", MARIO);
     sScriptState = sInputSeed * 2654435761u + 1;
 
-    const char* rec = getenv("MK64_REPLAY_RECORD");
-    const char* play = getenv("MK64_REPLAY_PLAY");
+    const char* rec = ResolvePath(getenv("MK64_REPLAY_RECORD"));
+    const char* play = ResolvePath(getenv("MK64_REPLAY_PLAY"));
     if (rec && *rec) {
         sRecord = fopen(rec, "w");
         if (sRecord == NULL) {
