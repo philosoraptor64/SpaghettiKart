@@ -1,5 +1,6 @@
 #include <libultraship.h>
 #include "port/Rollback.h"
+#include "port/KartNet.h"
 #include <common_structs.h>
 #include <macros.h>
 #include <mk64.h>
@@ -246,7 +247,9 @@ s8 func_800C16E8(f32 arg0, f32 arg1, u8 cameraId) {
     f32 var_f20;
     f32 var_f2;
 
-    if (D_800EA1C0 == 0) {
+    /* Online, each device shows only its own player full screen: pan like
+     * 1P instead of sending each split screen's sounds to one side. */
+    if (D_800EA1C0 == 0 || KartNet_WantsLocalView()) {
         if (D_800EA0F4 != 0) {
             var_f2 = 10.0f;
             var_f14 = 20.0f;
@@ -1281,6 +1284,9 @@ void func_800C40F0(u8 arg0) {
 void play_sound(u32 soundBits, Vec3f* position, u8 cameraId, f32* arg3, f32* arg4, s8* arg5) {
     if (gRollbackResim) {
         return; /* rollback re-simulation: these sounds already played */
+    }
+    if (KartNet_WantsLocalView() && cameraId != KartNet_LocalPlayer()) {
+        return; /* online: the other player's screen is on the other device */
     }
     u8 bank;
     struct Sound* temp_v0;
