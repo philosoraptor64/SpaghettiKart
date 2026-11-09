@@ -149,7 +149,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE n64net)
 n64net_add_build_id(${PROJECT_NAME}
   HEADER ${CMAKE_BINARY_DIR}/generated/kartnet_build_id.h
   MACRO KARTNET_BUILD_ID
-  ENTRIES "${CMAKE_SOURCE_DIR}::src")
+  ENTRIES "${CMAKE_SOURCE_DIR}::src"
+          "${CMAKE_SOURCE_DIR}/n64net::client/src/n64net_input.cpp"
+          "${CMAKE_SOURCE_DIR}/n64net::client/include/n64net_input.h")
 
 # Rollback snapshots: put the game's mutable C globals in the __MKSNAP segment
 # (src/port/SnapshotSection.h). -fno-common turns tentative definitions into
