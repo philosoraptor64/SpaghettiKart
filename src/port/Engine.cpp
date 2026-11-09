@@ -495,7 +495,17 @@ static int64_t AudioNowUs() {
 /* Audio output. While n64net voice runs with the mic on iOS, the game's audio
  * goes through n64net's voice-processing unit (echo cancellation needs to hear
  * everything the speaker plays) instead of the normal audio device. */
+/* i64 module: the host plays the game's audio (mixed with its voice chat);
+ * set by src/port/i64_module.cpp for a run. */
+extern "C" {
+void (*gPortHostAudioWrite)(const int16_t* stereo, uint32_t frames, uint32_t rate) = nullptr;
+uint32_t (*gPortHostAudioBuffered)(uint32_t rate) = nullptr;
+}
+
 static int32_t AudioOutBuffered() {
+    if (gPortHostAudioWrite != nullptr && gPortHostAudioBuffered != nullptr) {
+        return (int32_t) gPortHostAudioBuffered(GameEngine_GetSampleRate());
+    }
 #ifdef KARTNET_VOICE
     if (n64net_voice_output_active()) {
         return n64net_voice_output_buffered((int) GameEngine_GetSampleRate());
@@ -504,6 +514,11 @@ static int32_t AudioOutBuffered() {
     return AudioPlayerBuffered();
 }
 static void AudioOutPlay(s16* stereo, u32 frames) {
+    if (gPortHostAudioWrite != nullptr) {
+        gPortHostAudioWrite(stereo, frames, GameEngine_GetSampleRate());
+        sLastAudioPlayUs = AudioNowUs();
+        return;
+    }
 #ifdef KARTNET_VOICE
     const int rate = (int) GameEngine_GetSampleRate();
     n64net_voice_mix(stereo, (int) frames, rate); /* the other player's voice */

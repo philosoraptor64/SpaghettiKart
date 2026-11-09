@@ -29,6 +29,7 @@
 #if defined(__APPLE__)
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
+extern "C" const struct mach_header_64 __dso_handle; /* this image (the app, or the i64 module dylib) */
 #include <mach/mach.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -82,7 +83,7 @@ bool AllZero(const uint8_t* p, size_t n) {
 void SaveSection(const char* segment, const char* section) {
 #if defined(__APPLE__)
     unsigned long size = 0;
-    uint8_t* base = getsectiondata(&_mh_execute_header, segment, section, &size);
+    uint8_t* base = getsectiondata(&__dso_handle, segment, section, &size);
     if (base == nullptr || size == 0) {
         return;
     }

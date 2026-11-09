@@ -32,6 +32,7 @@
 #if defined(__APPLE__)
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
+extern "C" const struct mach_header_64 __dso_handle; /* this image (the app, or the i64 module dylib) */
 #include <mach-o/dyld.h>
 #include <dlfcn.h>
 #endif
@@ -80,9 +81,9 @@ void FindSections() {
     sReady = true;
 #if defined(__APPLE__)
     unsigned long size = 0;
-    sData.base = getsectiondata(&_mh_execute_header, "__MKSNAP", "__data", &size);
+    sData.base = getsectiondata(&__dso_handle, "__MKSNAP", "__data", &size);
     sData.size = size;
-    sBss.base = getsectiondata(&_mh_execute_header, "__MKSNAP", "__bss", &size);
+    sBss.base = getsectiondata(&__dso_handle, "__MKSNAP", "__bss", &size);
     sBss.size = size;
     sSupported = sData.base && sBss.base;
     fprintf(stderr, "Rollback: snapshot sections data=%zu KB bss=%zu KB%s\n", sData.size / 1024, sBss.size / 1024,

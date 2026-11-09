@@ -1140,6 +1140,9 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include <algorithm>
 
 static void GameMainOnce(unsigned long soakFrames, bool fullShutdown);
+extern "C" void Port_RunBegin(void);
+extern "C" int Port_RunFrame(void);
+extern "C" void Port_RunEnd(int fullShutdown);
 
 #ifdef _WIN32
 int SDL_main(int argc, char** argv) {
@@ -1225,6 +1228,17 @@ extern "C"
  * frames. fullShutdown: also destroy libultraship's context and spdlog's
  * loggers, so the next run (after Reentry_RestorePristine) starts clean. */
 static void GameMainOnce(unsigned long soakFrames, bool fullShutdown) {
+    Port_RunBegin();
+    unsigned long frames = 0;
+    while ((soakFrames == 0 || frames++ < soakFrames) && Port_RunFrame()) {
+    }
+    Port_RunEnd(fullShutdown);
+}
+
+/* One run in three steps (the i64 module, src/port/i64_module.cpp, calls them
+ * from the host's frame loop; GameMainOnce above is the stand-alone loop). */
+extern "C" void Port_RunBegin(void) {
+    sStopRequested = false;
     // load_wasm();
     GameEngine::Create();
     audio_init();
@@ -1254,10 +1268,18 @@ static void GameMainOnce(unsigned long soakFrames, bool fullShutdown) {
 
     thread5_game_loop();
     gEditor.Load();
-    unsigned long frames = 0;
-    while (WindowIsRunning() && !sStopRequested && (soakFrames == 0 || frames++ < soakFrames)) {
-        push_frame();
+}
+
+/* One frame. Returns 0 once the run is over (window closed, quit, stop request). */
+extern "C" int Port_RunFrame(void) {
+    if (!WindowIsRunning() || sStopRequested) {
+        return 0;
     }
+    push_frame();
+    return 1;
+}
+
+extern "C" void Port_RunEnd(int fullShutdown) {
     CustomEngineDestroy();
     // GameEngine::Instance->ProcessFrame(push_frame);
     GameEngine::Instance->Destroy();

@@ -131,7 +131,20 @@ if(SPAGHETTIKART_IOS)
   list(APPEND ALL_FILES ${ICON_FILES})
 endif()
 
-add_executable(${PROJECT_NAME} ${ALL_FILES})
+# i64 game module (Mac): the same game as a shared library that exports only
+# the n64_game_* functions (src/port/i64/exports.txt; src/port/i64_module.cpp)
+# for the i64 launcher, which owns the app, SDL, the window, audio and the
+# network session. The stand-alone app is unchanged when this is OFF.
+option(SPAGHETTIKART_I64_MODULE "Build Mario Kart as an i64 game module" OFF)
+if(SPAGHETTIKART_I64_MODULE)
+  add_library(${PROJECT_NAME} SHARED ${ALL_FILES})
+  target_compile_definitions(${PROJECT_NAME} PRIVATE SPAGHETTIKART_I64_MODULE=1)
+  set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME mk64_i64)
+  target_link_options(${PROJECT_NAME} PRIVATE
+    "-Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/src/port/i64/exports.txt")
+else()
+  add_executable(${PROJECT_NAME} ${ALL_FILES})
+endif()
 target_include_directories(
   ${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
                           ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -325,7 +338,7 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND NOT SPAGHETTIKART_IOS)
       COMPONENT ${PROJECT_NAME})
   endif()
 
-  if(APPLE AND NOT SPAGHETTIKART_IOS)
+  if(APPLE AND NOT SPAGHETTIKART_IOS AND NOT SPAGHETTIKART_I64_MODULE)
     configure_file("${CMAKE_SOURCE_DIR}/Info.plist"
                    "${CMAKE_BINARY_DIR}/Info.plist" COPYONLY)
     # Assemble SpaghettiKart.app: app icon, bundle metadata, resources, dylib

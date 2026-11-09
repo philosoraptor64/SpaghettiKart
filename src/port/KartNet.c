@@ -51,6 +51,7 @@ void GameEngine_AudioKeepAlive(void); /* Engine.cpp */
 #if defined(__APPLE__)
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
+extern const struct mach_header_64 __dso_handle; /* this image (the app, or the i64 module dylib) */
 #include <mach-o/dyld.h>
 #endif
 
@@ -2090,7 +2091,7 @@ static void ProbeMaybeDump(void) {
     uintptr_t poolStart = sPoolEnd - 0x10000000;
     for (int i = 0; i < 3; i++) {
         unsigned long size = 0;
-        u8* base = getsectiondata(&_mh_execute_header, "__DATA", sects[i], &size);
+        u8* base = getsectiondata(&__dso_handle, "__DATA", sects[i], &size);
         if (!base) {
             continue;
         }
