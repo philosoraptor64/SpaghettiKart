@@ -1007,8 +1007,15 @@ UNUSED s16 func_802B7D28(f32 arg0) {
     return _atan2f(sqrtf(1.0 - (f64) (arg0 * arg0)), arg0) * 32768.0f / M_PI;
 }
 
+/* debug (KartNet MK64_NET_REC_ALL): told about every call, with the caller */
+void (*gRandomTrace)(void* caller) MK_SNAPSHOT_OUTSIDE = NULL;
+
 u16 random_u16(void) {
     u16 temp1, temp2;
+
+    if (gRandomTrace != NULL) {
+        gRandomTrace(__builtin_return_address(0));
+    }
 
     if (gRandomSeed16 == 22026) {
         gRandomSeed16 = 0;

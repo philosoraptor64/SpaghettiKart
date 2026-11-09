@@ -766,8 +766,26 @@ void move_u16_towards(u16* startingValue, s16 targetValue, f32 somePercent) {
     *startingValue -= ((*startingValue - targetValue) * somePercent);
 }
 
+/* Netplay: kart particles (dust, sparks, splashes) are cosmetic, but their
+ * logic draws from the game's random generator, and their state is touched
+ * by drawing too (which differs per device: each draws only its own view),
+ * so the number of random draws could differ between two players and shift
+ * every later random number in the race (seen: an occasional desync right
+ * after the start). Online, particles use their own random stream; offline
+ * the game behaves exactly as the original. */
+u16 gParticleRandomSeed16 = 0;
+extern int KartNet_IsolateCosmeticRng(void);
+
 void func_80022744(void) {
-    func_8006E058();
+    if (KartNet_IsolateCosmeticRng()) {
+        const u16 raceSeed = gRandomSeed16;
+        gRandomSeed16 = gParticleRandomSeed16;
+        func_8006E058();
+        gParticleRandomSeed16 = gRandomSeed16;
+        gRandomSeed16 = raceSeed;
+    } else {
+        func_8006E058();
+    }
     func_8002276C();
 }
 

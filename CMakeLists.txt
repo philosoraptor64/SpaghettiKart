@@ -136,6 +136,10 @@ endif()
 # for the i64 launcher, which owns the app, SDL, the window, audio and the
 # network session. The stand-alone app is unchanged when this is OFF.
 option(SPAGHETTIKART_I64_MODULE "Build Mario Kart as an i64 game module" OFF)
+if(SPAGHETTIKART_I64_MODULE AND SPAGHETTIKART_IOS)
+  # SDL comes from the host app (i64 embeds @rpath/libSDL2-2.0.0.dylib)
+  set(LUS_SHARED_SDL ON CACHE BOOL "" FORCE)
+endif()
 if(SPAGHETTIKART_I64_MODULE)
   add_library(${PROJECT_NAME} SHARED ${ALL_FILES})
   target_compile_definitions(${PROJECT_NAME} PRIVATE SPAGHETTIKART_I64_MODULE=1)
@@ -168,6 +172,8 @@ endif()
 
 if(SPAGHETTIKART_IOS)
   target_compile_definitions(${PROJECT_NAME} PRIVATE PLATFORM_IOS=1)
+endif()
+if(SPAGHETTIKART_IOS AND NOT SPAGHETTIKART_I64_MODULE)
   set_xcode_property(${PROJECT_NAME} PRODUCT_BUNDLE_IDENTIFIER ${PROJECT_ID}
                      All)
   set_target_properties(

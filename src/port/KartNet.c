@@ -13,6 +13,8 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <dlfcn.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -74,6 +76,9 @@ static int sLocalPlayer = 0; /* 0 host, 1 guest */
 static FILE* sLog = NULL;
 
 static int sSock = -1;
+static int sRecAll = 0; /* MK64_NET_REC_ALL: per-tick hash trace in the race record */
+extern void (*gRandomTrace)(void* caller);
+static void RandomTraceCb(void* caller);
 static struct sockaddr_in sPeer;
 static int sHavePeer = 0;
 
@@ -741,6 +746,8 @@ static void Init(void) {
     }
     sRollback = EnvInt("MK64_NET_ROLLBACK", 1) != 0 && Rollback_Supported();
     sSession = EnvInt("MK64_NET_SESSION", 0) != 0;
+    sRecAll = EnvInt("MK64_NET_REC_ALL", 0) != 0;
+    gRandomTrace = sRecAll ? RandomTraceCb : NULL;
     sMenuDelayCeiling = (int) EnvInt("MK64_NET_MENU_MAX_DELAY", 6);
     sRbWindow = (uint32_t) EnvInt("MK64_NET_ROLLBACK_WINDOW", 8);
     sRbFrom = EnvInt("MK64_NET_ROLLBACK_FROM", 60);
@@ -1652,9 +1659,44 @@ static void ApplyNetPads(unsigned long tick) {
 }
 
 static Player sHashCopy[NUM_PLAYERS];
+static void RandomTraceCb(void* caller) {
+    Dl_info info;
+    if (sRec == NULL || gRollbackResim) {
+        return;
+    }
+    if (dladdr(caller, &info) && info.dli_fbase) {
+        fprintf(sRec, "r %lu %lx%s\n", sTick, (unsigned long) ((uintptr_t) caller - (uintptr_t) info.dli_fbase),
+                pthread_main_np() ? "" : " thread");
+    }
+}
+
 static void RecordTickHash(unsigned long tick) {
     sTickHash[tick % RB_HASHES] = StateHash();
     sTickHashTick[tick % RB_HASHES] = (long) tick;
+    if (sRec && sRecAll && !gRollbackResim) {
+        /* debug (MK64_NET_REC_ALL=1): every tick's hash, RNG and per-kart
+         * hashes ('g' lines; playback ignores them), to find where two
+         * sides part */
+        fprintf(sRec, "g %lu %08x rng %04x", tick, (unsigned) (sTickHash[tick % RB_HASHES] >> 32), gRandomSeed16);
+        for (int k = 0; k < NUM_PLAYERS; k++) {
+            fprintf(sRec, " %08x", (unsigned) Fnv1a(1469598103934665603ull, &sHashCopy[k], sizeof(Player)));
+        }
+        fputc('\n', sRec);
+        /* MK64_NET_REC_DUMP_FROM/_TO: the hashed (masked) karts of those
+         * ticks, raw, appended to <record>.ticks (tick u32 + 8 Players) */
+        const long from = EnvInt("MK64_NET_REC_DUMP_FROM", -1), to = EnvInt("MK64_NET_REC_DUMP_TO", -1);
+        if ((long) tick >= from && (long) tick <= to && sRecBase[0]) {
+            char path[1100];
+            snprintf(path, sizeof(path), "%s.ticks", sRecBase);
+            FILE* f = fopen(path, (long) tick == from ? "wb" : "ab");
+            if (f) {
+                uint32_t t32 = (uint32_t) tick;
+                fwrite(&t32, 4, 1, f);
+                fwrite(sHashCopy, sizeof(sHashCopy), 1, f);
+                fclose(f);
+            }
+        }
+    }
     if (tick % HASH_EVERY == 0) {
         /* StateHash left the masked kart copy in sHashCopy */
         const int d = (int) ((tick / HASH_EVERY) % DETAIL_RING);
@@ -2248,6 +2290,12 @@ int KartNet_WantsLocalView(void) {
  * before the globals are reset (their pointers would be lost). */
 void KartNet_Shutdown(void) {
     ResetNetState();
+}
+
+/* Netplay or a netplay playback: cosmetic effects use their own random
+ * stream (render_player.c func_80022744). */
+int KartNet_IsolateCosmeticRng(void) {
+    return sState != NET_OFF || sPlayback;
 }
 
 /* The netplay run ended (the peer left or went silent, or the handshake failed). */

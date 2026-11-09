@@ -156,7 +156,8 @@ extern "C" N64_GAME_EXPORT int n64_game_start(const n64_host* host, const n64_la
         }
         if (host->data_dir != nullptr && host->data_dir[0] != '\0') {
             /* sync log + per-race input/hash records (desync forensics) */
-            std::snprintf(sNetLog, sizeof(sNetLog), "%s/kartnet-%s.log", host->data_dir, isHost ? "host" : "guest");
+            std::snprintf(sNetLog, sizeof(sNetLog), "%s/kartnet-%s-run%u.log", host->data_dir, isHost ? "host" : "guest",
+                          launch->run);
             SetEnv("MK64_NET_LOG", sNetLog);
         }
         gKartNetHostSend = host->net_send;
