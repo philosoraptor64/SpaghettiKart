@@ -998,6 +998,9 @@ extern "C" {
 // DIDENTERFOREGROUND. UIKit delivers these through SDL's event watchers on
 // the main thread, synchronously, before the app actually goes away.
 static std::atomic<bool> sIosInBackground{ false };
+extern "C" int Port_IsInBackground(void) {
+    return sIosInBackground ? 1 : 0;
+}
 
 static int IosLifecycleWatch(void*, SDL_Event* event) {
     switch (event->type) {
@@ -1030,6 +1033,12 @@ static bool IosWaitWhileBackgrounded() {
     SDL_PumpEvents();
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     return true;
+}
+#endif
+
+#if !defined(PLATFORM_IOS)
+extern "C" int Port_IsInBackground(void) {
+    return 0;
 }
 #endif
 

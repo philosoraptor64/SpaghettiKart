@@ -102,6 +102,7 @@ extern "C" {
 void GameEngine_ProcessGfxCommands(Gfx* commands);
 uint32_t GameEngine_GetSampleRate();
 void GameEngine_AudioKeepAlive(void); /* netplay stalls: keep the voice chat playing */
+void GameEngine_DrawStatusFrame(void); /* netplay waits: a frame with only the status overlay */
 uint32_t GameEngine_GetSamplesPerFrame();
 float GameEngine_GetAspectRatio();
 struct CtlEntry* GameEngine_LoadBank(uint8_t bankId);

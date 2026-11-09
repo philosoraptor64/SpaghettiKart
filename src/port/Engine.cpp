@@ -692,6 +692,14 @@ extern "C" void GameEngine_AudioKeepAlive(void) {
 #endif
 }
 
+/* Netplay waits block the game loop: draw one frame with no game graphics so
+ * the status overlay (ImguiUI.cpp) shows and the window stays alive. */
+extern "C" void GameEngine_DrawStatusFrame(void) {
+    static Gfx sEmpty[] = { gsSPEndDisplayList() };
+    std::vector<std::unordered_map<Mtx*, MtxF>> none(1);
+    GameEngine::RunCommands(sEmpty, none);
+}
+
 extern "C" uint32_t GameEngine_GetSamplesPerFrame() {
     return SAMPLES_PER_FRAME;
 }

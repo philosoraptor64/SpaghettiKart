@@ -21,6 +21,7 @@
 #include "PortMenu.h"
 
 extern "C" {
+const char* KartNet_WaitMessage(void); /* port/KartNet.c */
 extern s32 gGamestateNext;
 extern s32 gMenuSelection;
 #include "audio/external.h"
@@ -28,6 +29,59 @@ extern s32 gMenuSelection;
 }
 
 namespace GameUI {
+/* Netplay status ("Waiting for the other player..."): drawn over everything
+ * while KartNet has a wait message (rendezvous, handshake, long stalls). */
+class NetplayStatusOverlay : public Ship::GuiWindow {
+  public:
+    using Ship::GuiWindow::GuiWindow;
+    void Draw() override {
+        const char* msg = KartNet_WaitMessage();
+        if (msg == nullptr || msg[0] == '\0') {
+            return;
+        }
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImDrawList* dl = ImGui::GetForegroundDrawList(vp);
+        dl->AddRectFilled(vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y), IM_COL32(0, 0, 0, 170));
+        ImFont* font = ImGui::GetFont();
+        float size = vp->Size.y / 16.0f;
+        if (size < 18.0f) {
+            size = 18.0f;
+        }
+        /* One line per '\n', centered. */
+        std::string all(msg);
+        std::vector<std::string> lines;
+        size_t start = 0;
+        while (true) {
+            size_t nl = all.find('\n', start);
+            lines.push_back(all.substr(start, nl == std::string::npos ? std::string::npos : nl - start));
+            if (nl == std::string::npos) {
+                break;
+            }
+            start = nl + 1;
+        }
+        float lineH = size * 1.4f;
+        float y = vp->Pos.y + (vp->Size.y - lineH * (float) lines.size()) / 2.0f;
+        for (size_t i = 0; i < lines.size(); i++) {
+            float s = i == 0 ? size : size * 0.75f;
+            ImVec2 ts = font->CalcTextSizeA(s, FLT_MAX, 0.0f, lines[i].c_str());
+            ImVec2 pos(vp->Pos.x + (vp->Size.x - ts.x) / 2.0f, y);
+            dl->AddText(font, s, ImVec2(pos.x + 2, pos.y + 2), IM_COL32(0, 0, 0, 255), lines[i].c_str());
+            dl->AddText(font, s, pos, i == 0 ? IM_COL32(255, 255, 255, 255) : IM_COL32(200, 200, 200, 255),
+                        lines[i].c_str());
+            y += lineH;
+        }
+    }
+
+  protected:
+    void InitElement() override {
+    }
+    void DrawElement() override {
+    }
+    void UpdateElement() override {
+    }
+};
+std::shared_ptr<Ship::GuiWindow> mNetplayStatus;
+
 // std::shared_ptr<GameMenuBar> mGameMenuBar;
 std::shared_ptr<PortMenu> mPortMenu;
 std::shared_ptr<Ship::GuiWindow> mConsoleWindow;
@@ -86,6 +140,9 @@ void SetupGuiElements() {
     mContentBrowserWindow =
         std::make_shared<TrackEditor::ContentBrowserWindow>("gEditorEnabled", "Content Browser");
     gui->AddGuiWindow(mContentBrowserWindow);
+
+    mNetplayStatus = std::make_shared<NetplayStatusOverlay>("gNetplayStatusOverlay", true, "Netplay Status");
+    gui->AddGuiWindow(mNetplayStatus);
 }
 
 void Destroy() {
@@ -97,6 +154,7 @@ void Destroy() {
     mPropertiesWindow = nullptr;
     mTrackPropertiesWindow = nullptr;
     mContentBrowserWindow = nullptr;
+    mNetplayStatus = nullptr;
 }
 
 std::string GetWindowButtonText(const char* text, bool menuOpen) {

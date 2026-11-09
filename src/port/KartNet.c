@@ -415,6 +415,50 @@ static void HandlePacket(const u8* buf, size_t len, const struct sockaddr_in* fr
     }
 }
 
+/* Status overlay (port/ui/ImguiUI.cpp draws KartNet_WaitMessage over the
+ * game): what the player is waiting for. Timed messages vanish by themselves. */
+int Port_IsInBackground(void); /* Game.cpp */
+void GameEngine_DrawStatusFrame(void); /* Engine.cpp */
+static char sWaitMsg[200];
+static double sWaitUntil = 0; /* 0 = until cleared */
+static char sRoomCode[8];
+
+static void SetWait(double seconds, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+static void SetWait(double seconds, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(sWaitMsg, sizeof(sWaitMsg), fmt, ap);
+    va_end(ap);
+    sWaitUntil = seconds > 0 ? NowMs() + seconds * 1000 : 0;
+}
+
+static void ClearWait(void) {
+    sWaitMsg[0] = '\0';
+}
+
+const char* KartNet_WaitMessage(void) {
+    if (sWaitMsg[0] && sWaitUntil > 0 && NowMs() > sWaitUntil) {
+        sWaitMsg[0] = '\0';
+    }
+    return sWaitMsg;
+}
+
+/* Inside a blocking wait: draw a status-only frame now and then (that also
+ * handles window events); just pump events while iOS has the app in the
+ * background (no GPU work allowed then). */
+static void ShowWaiting(void) {
+    static double last = 0;
+    double now = NowMs();
+    if (Port_IsInBackground()) {
+        SDL_PumpEvents();
+        return;
+    }
+    if (now - last >= 33) {
+        last = now;
+        GameEngine_DrawStatusFrame();
+    }
+}
+
 /* Voice chat (MK64_NET_VOICE=1 open mic, =ptt push-to-talk; MK64_NET_VOICE_TEST=1
  * a tone instead of the microphone). Voice packets share the race socket. */
 static int sVoiceMode = 0, sVoiceTest = 0, sVoiceStarted = 0;
@@ -484,7 +528,7 @@ static void Poll(void) {
 
 static void NetLogCb(const char* fmt, ...);
 static void PumpWhileWaiting(void) {
-    SDL_PumpEvents(); /* keep the window and the iOS life cycle responsive */
+    ShowWaiting();
 }
 
 static void Init(void) {
@@ -588,10 +632,18 @@ static void Init(void) {
         rc.wait_secs = (int) EnvInt("MK64_NET_WAIT_SECS", 600);
         rc.log = NetLogCb;
         rc.yield = PumpWhileWaiting;
+        if (sIsHost) {
+            SetWait(0, "Opening a room...");
+        } else {
+            SetWait(0, "Joining room %s...", (rc.room && *rc.room) ? rc.room : "");
+        }
         Log("%s room %s on %s (game %s)", sIsHost ? "hosting" : "joining", (rc.room && *rc.room) ? rc.room : "(random)",
             server, rc.game);
         if (n64net_rendezvous_connect(sSock, &rc, &rr) != 0) {
             Log("room code failed: %s", rr.error);
+            if (!strstr(sWaitMsg, "version") && !strstr(sWaitMsg, "password")) {
+                SetWait(8, "Could not connect to the other player\n%s", rr.error);
+            }
             close(sSock);
             sSock = -1;
             sState = NET_DONE;
@@ -599,6 +651,7 @@ static void Init(void) {
         }
         sPeer = rr.peer;
         sHavePeer = 1;
+        snprintf(sRoomCode, sizeof(sRoomCode), "%s", rr.room);
         Log("room %s: connected to %s%s", rr.room, AddrStr(&rr.peer), rr.relayed ? " (relayed by the server)" : "");
     } else if (!sIsHost) {
         const char* peer = getenv("MK64_NET_PEER");
@@ -670,12 +723,22 @@ void KartNet_BeginFrame(void) {
                 SendHello();
             }
         }
+        if (sIsHost && !sHavePeer) {
+            if (sRoomCode[0] == '\0') {
+                SetWait(0, "Waiting for the other player...");
+            }
+        } else {
+            SetWait(0, "Connecting to the other player...");
+        }
         if (sBootFrames < START_BOOT_FRAME) {
             return; /* keep booting meanwhile */
         }
-        SDL_PumpEvents(); /* keep the window (and iOS life cycle) responsive */
+        ShowWaiting();
         usleep(5000);
         Poll();
+    }
+    if (sState == NET_RUNNING && !sRaceRequested) {
+        ClearWait();
     }
     if (sState != NET_RUNNING) {
         return;
@@ -777,6 +840,15 @@ static void NetLogCb(const char* fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     Log("n64net: %s", buf);
+    char room[8];
+    if (sscanf(buf, "n64net: room code %7s - waiting", room) == 1) {
+        snprintf(sRoomCode, sizeof(sRoomCode), "%s", room);
+        SetWait(0, "Room %s\nWaiting for the other player to join...", sRoomCode);
+    } else if (strstr(buf, "different build")) {
+        SetWait(10, "The other player has a different version\nBoth players need the same build");
+    } else if (strstr(buf, "refused the password")) {
+        SetWait(10, "The room server refused the password");
+    }
 }
 
 static void ApplyNetPads(unsigned long tick) {
@@ -884,24 +956,38 @@ static void NetFrame(const NetPad* local) {
 
     if (!n64net_input_ready(sNet, (uint32_t) sTick)) {
         double start = NowMs(), lastPump = start;
+        int shown = 0;
         sStalls++;
         while (!n64net_input_ready(sNet, (uint32_t) sTick)) {
             usleep(500);
             Poll();
             n64net_input_resend(sNet);
             double now = NowMs();
-            if (now - lastPump > 50) {
+            double silentMs = n64net_input_peer_silence_usecs(sNet) / 1000.0;
+            int away = n64net_input_peer_away(sNet) || sPeerPaused;
+            if (now - start > 1000) {
+                /* A long wait: say why (short ones would just flicker). */
+                if (away) {
+                    SetWait(0, "The other player switched to another app\nWaiting for them to come back...");
+                } else {
+                    SetWait(0, "Waiting for the other player...\nConnection is slow");
+                }
+                shown = 1;
+                ShowWaiting();
+            } else if (now - lastPump > 50) {
                 lastPump = now;
                 SDL_PumpEvents();
             }
-            double silentMs = n64net_input_peer_silence_usecs(sNet) / 1000.0;
-            int away = n64net_input_peer_away(sNet) || sPeerPaused;
             if (silentMs > (away ? PAUSED_TIMEOUT_MS : WAIT_TIMEOUT_MS) ||
                 (silentMs == 0 && now - start > WAIT_TIMEOUT_MS)) {
                 Log("peer silent at tick %lu; netplay stopped", sTick);
+                SetWait(8, "Lost the connection to the other player");
                 sState = NET_DONE;
                 return;
             }
+        }
+        if (shown) {
+            ClearWait();
         }
         sStallMs += NowMs() - start;
     }
