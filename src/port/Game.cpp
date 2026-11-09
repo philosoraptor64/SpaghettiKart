@@ -1122,6 +1122,18 @@ void CM_ThrowRuntimeError(const char* fmt, ...) {
 #include <CoreFoundation/CoreFoundation.h>
 #endif
 #include "port/Reentry.h"
+static bool sStopRequested = false; /* this run should end (restored to false for the next) */
+extern "C" void Port_RequestStop(void) {
+    sStopRequested = true;
+}
+namespace SM64 {
+extern bool gAudioSampleFreeData; /* resource/type/AudioSample.cpp */
+}
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+extern "C" void* objc_autoreleasePoolPush(void);
+extern "C" void objc_autoreleasePoolPop(void*);
+#endif
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include "port/SimHeap.h"
 #include <spdlog/spdlog.h>
@@ -1170,7 +1182,22 @@ extern "C"
     const char* soakFramesEnv = getenv("MK64_SOAK_FRAMES");
     const unsigned long soakFrames = cycles > 1 ? (soakFramesEnv ? strtoul(soakFramesEnv, nullptr, 0) : 600) : 0;
     for (int cycle = 0; cycle < cycles; cycle++) {
+        if (cycles > 1) {
+            char run[16];
+            snprintf(run, sizeof(run), "%d", cycle + 1);
+            setenv("MK64_SOAK_RUN", run, 1);
+        }
         if (cycle > 0) {
+#if defined(__APPLE__)
+            // let AppKit finish closing the last run's window (it keeps the
+            // window, its Metal view and their IOSurfaces until the run loop
+            // turns), inside a pool so what it autoreleases goes too
+            void* pool = objc_autoreleasePoolPush();
+            for (int i = 0; i < 5; i++) {
+                CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, true);
+            }
+            objc_autoreleasePoolPop(pool);
+#endif
             SimHeap_ReleaseForReentry();
             Reentry_RestorePristine();
         }
@@ -1228,13 +1255,14 @@ static void GameMainOnce(unsigned long soakFrames, bool fullShutdown) {
     thread5_game_loop();
     gEditor.Load();
     unsigned long frames = 0;
-    while (WindowIsRunning() && (soakFrames == 0 || frames++ < soakFrames)) {
+    while (WindowIsRunning() && !sStopRequested && (soakFrames == 0 || frames++ < soakFrames)) {
         push_frame();
     }
     CustomEngineDestroy();
     // GameEngine::Instance->ProcessFrame(push_frame);
     GameEngine::Instance->Destroy();
     if (fullShutdown) {
+        SM64::gAudioSampleFreeData = true; // the audio thread is stopped: samples can go with their resources
         Ship::Context::DestroyInstance(); // window, renderer, resource threads, audio, config
         spdlog::shutdown();               // spdlog is a shared library: drop its loggers and thread pool
         // ...and give it a plain default logger again (what a fresh process has),

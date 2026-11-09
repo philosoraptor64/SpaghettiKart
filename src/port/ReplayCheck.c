@@ -49,6 +49,8 @@ static long EnvInt(const char* name, long def) {
 
 /* iOS apps start in "/", so relative paths are taken from the app's Documents
  * folder there (where devicectl copies files in and out). */
+void Port_RequestStop(void); /* Game.cpp */
+
 static const char* ResolvePath(const char* path) {
 #if defined(PLATFORM_IOS)
     static char buf[4][1024];
@@ -68,6 +70,14 @@ static void Init(void) {
     const char* path = ResolvePath(getenv("MK64_REPLAY_CHECK"));
     if (path == NULL || *path == '\0') {
         return;
+    }
+    /* in a soak (MK64_SOAK, several runs in one process) each run writes
+     * <path>.<run> so the runs can be compared */
+    char soakPath[1100];
+    const char* run = getenv("MK64_SOAK_RUN");
+    if (run != NULL) {
+        snprintf(soakPath, sizeof(soakPath), "%s.%s", path, run);
+        path = soakPath;
     }
     sLog = fopen(path, "w");
     if (sLog == NULL) {
@@ -267,6 +277,11 @@ void ReplayCheck_EndFrame(void) {
         fprintf(sLog, "# done\n");
         fclose(sLog);
         sLog = NULL;
+        if (getenv("MK64_SOAK_RUN") != NULL) {
+            Port_RequestStop(); /* end this run; the soak starts the next */
+            sActive = 0;
+            return;
+        }
         _exit(0);
     }
 }

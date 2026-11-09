@@ -43,6 +43,7 @@ SM64::AudioSampleFactoryV0::ReadResource(std::shared_ptr<Ship::File> file,
     bank->mData.loop = &bank->loop;
     bank->mData.book = &bank->book;
     bank->mData.sampleAddr = (uint8_t*) sampleData;
+    bank->mOwnedData = sampleData;
     bank->mData.sampleSize = sampleSize;
 
     return bank;

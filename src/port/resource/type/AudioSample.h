@@ -29,6 +29,8 @@ struct AudioBankSample {
 namespace SM64 {
 
 
+extern bool gAudioSampleFreeData; /* see AudioSample.cpp */
+
 class AudioSample : public Ship::Resource<AudioBankSample> {
   public:
     using Resource::Resource;
@@ -44,5 +46,6 @@ class AudioSample : public Ship::Resource<AudioBankSample> {
     AdpcmLoop loop;
     AdpcmBook book;
     std::vector<uint8_t> sampleAddr;
+    char* mOwnedData = nullptr; /* the sample data as AudioSampleFactory allocated it */
 };
 }
