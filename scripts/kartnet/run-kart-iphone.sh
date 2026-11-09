@@ -8,6 +8,8 @@
 #   MAC_BOT=seed  scripted driver on the Mac (default: Mac controller/keyboard)
 #   ROLLBACK=0    lockstep instead of rollback (the default); WINDOW=n (8)
 #   SESSION=1     online session: both run the game's own menus as one console (Mac = player 1)
+#   MAC_QUIT=n    (session, with MAC_BOT) the Mac bot quits each race n ticks in via the pause menu
+#   MAC_QUIT_FINISH=1  ... quits 5 s after the phone player finished instead
 #   VOICE=1|ptt   voice chat on both sides; MAC_TONE=1 / PHONE_TONE=1 = that side sends a tone, not its mic
 #   PHONE_BOT=seed scripted driver on the phone (default: phone's controller)
 #   DELAY=n       input delay in frames (default 2)
@@ -59,6 +61,8 @@ host_env=(MK64_NET=1 MK64_NET_HOST=1 MK64_NET_BIND=0.0.0.0:7101 MK64_NET_DELAY="
 [ -n "${WINDOW:-}" ] && host_env+=(MK64_NET_ROLLBACK_WINDOW="$WINDOW")
 [ -n "${VOICE:-}" ] && host_env+=(MK64_NET_VOICE="$VOICE")
 [ -n "${SESSION:-}" ] && host_env+=(MK64_NET_SESSION=1)
+[ -n "${MAC_QUIT:-}" ] && host_env+=(MK64_NET_BOT_QUIT="$MAC_QUIT")
+[ -n "${MAC_QUIT_FINISH:-}" ] && host_env+=(MK64_NET_BOT_QUIT_FINISH=1)
 [ -n "${MAC_TONE:-}" ] && host_env+=(MK64_NET_VOICE_TEST=1)
 [ -n "${MAC_CHAR:-}" ] && host_env+=(MK64_NET_CHAR="$MAC_CHAR")
 [ -n "${CUP:-}" ] && host_env+=(MK64_NET_CUP="$CUP")

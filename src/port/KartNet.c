@@ -82,6 +82,8 @@ static void LoadReplay(const char* path);
 static int sBot = 0;
 static int sBotDrift = 0; /* MK64_NET_BOT_DRIFT=1: the bot also drifts */
 static long sBotQuitAt = 0; /* MK64_NET_BOT_QUIT=n: session bot quits each race n ticks in */
+static int sBotQuitFinish = 0; /* MK64_NET_BOT_QUIT_FINISH=1: ... 5 s after another human finished */
+static long sBotQuitRace = -2, sBotQuitTick = -1;
 static int sBotExplore = 0;
 static unsigned int sExploreRng = 1;
 static int sExploreModePicks = 2; /* game modes picked so far (picks the next one); starts at battle */
@@ -729,6 +731,7 @@ static void Init(void) {
     sBot = (int) EnvInt("MK64_NET_BOT", 0);
     sBotDrift = (int) EnvInt("MK64_NET_BOT_DRIFT", 0);
     sBotQuitAt = EnvInt("MK64_NET_BOT_QUIT", 0);
+    sBotQuitFinish = EnvInt("MK64_NET_BOT_QUIT_FINISH", 0) != 0;
     sBotExplore = EnvInt("MK64_NET_BOT_EXPLORE", 0) != 0;
     sExploreRng = (unsigned int) EnvInt("MK64_NET_BOT_EXPLORE", 1) * 2654435761u + (sIsHost ? 1u : 7u);
     LoadReplay(getenv("MK64_NET_REPLAY"));
@@ -854,7 +857,9 @@ void apply_gamestate_change(void); /* main.c */
  * take effect ROLLBACK_WINDOW + 1 ticks late (ApplyNetPads). */
 static int RaceRollbackSafe(void) {
     return gGamestate == RACING && gGamestateNext == gGamestate && !gIsGamePaused && !gIsInQuitToMenuTransition &&
-           (gRaceState == RACE_STAGING || gRaceState == RACE_IN_PROGRESS);
+           (gRaceState == RACE_STAGING || gRaceState == RACE_IN_PROGRESS ||
+            /* someone has finished, the others still race (SyncTest-checked) */
+            gRaceState == RACE_CALCULATE_RANKS);
 }
 
 static void SessionBeforeGamestate(void) {
@@ -1105,12 +1110,29 @@ static NetPad BotInput(unsigned long f) {
         }
         return pad;
     }
-    if (sSession && sIsHost && sRaceStartTick >= 0 && sBotQuitAt > 0) {
+    if (sSession && sIsHost && sRaceStartTick >= 0 && sBotQuitFinish) {
+        /* session test with a person: quit 150 ticks (5 s) after another
+         * human player finished (the bot itself never finishes) */
+        if (sBotQuitRace != sRaceStartTick) {
+            sBotQuitRace = sRaceStartTick;
+            sBotQuitTick = -1;
+        }
+        if (sBotQuitTick < 0) {
+            for (int p = 0; p < sSessionPlayers; p++) {
+                if (p != sLocalPlayer && gPlayers[p].lapCount >= 3) {
+                    sBotQuitTick = (long) sTick + 150;
+                    Log("tick %lu: player %d finished; the bot quits in 5 s", sTick, p + 1);
+                }
+            }
+        }
+    }
+    if (sSession && sIsHost && sRaceStartTick >= 0 && (sBotQuitAt > 0 || sBotQuitTick >= 0)) {
         /* session test: leave the race through the pause menu (Start, then
          * down and A now and then), back to the menus for the next race */
         long r = (long) sTick - sRaceStartTick;
-        if (r >= sBotQuitAt && r < sBotQuitAt + 200) {
-            long k = r - sBotQuitAt;
+        const long at = sBotQuitTick >= 0 ? sBotQuitTick - sRaceStartTick : sBotQuitAt;
+        if (r >= at && r < at + 200) {
+            long k = r - at;
             pad.button = (k == 0) ? START_BUTTON : (k % 40 == 20) ? D_JPAD : (k % 40 == 0) ? A_BUTTON : 0;
             return pad;
         }

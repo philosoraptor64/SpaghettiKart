@@ -673,8 +673,12 @@ static void netplay_hud_push(s32 playerId) {
     h->timerY += 0x11 - 0x10;
     h->lapX += 0x53 - sNetHud2pLapX[playerId];
     h->lapY += 0x19 - 0x28;
-    h->itemBoxX = 0xA0;
-    h->itemBoxY = 0x20;
+    /* The item window slides in when there is an item: in 2 players by up to
+     * 0x80 sideways (slideItemBoxX), in 1 player by 0x40 down from above the
+     * screen (from itemBoxY -0x20 to 0x20). Show the 1-player slide: cancel the
+     * 2-player offsets and turn their progress into the 1-player one. */
+    h->itemBoxX = 0xA0 - h->slideItemBoxX;
+    h->itemBoxY = -0x20 + h->slideItemBoxX / 2 - h->slideItemBoxY;
     h->rankX += 52 - sNetHud2pRankX[playerId];
     h->rankY += 0xC8 - 0xD2;
 }

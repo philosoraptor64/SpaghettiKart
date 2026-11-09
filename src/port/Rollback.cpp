@@ -47,12 +47,15 @@ extern OSContPad gControllerPads[4];
 #include "buffers.h"
 #include "objects.h"
 #include "render_player.h"
+#include "menu_items.h"
 void rollback_sim_frame(void); /* main.c */
 extern const size_t gPlayerVtxSize[8]; /* data/some_data.c */
 extern struct ObjectInterpData2 prevObject2[]; /* math_util_2.c */
 extern const size_t gPrevObject2Size;
 }
 
+#include <set>
+#include <string>
 namespace {
 
 struct Region {
@@ -170,6 +173,9 @@ FILE* sLog = nullptr;
 unsigned long sChecks = 0, sMismatches = 0;
 double sSaveMs = 0, sResimMs = 0;
 int sReportBudget = 40;
+std::set<std::pair<std::string, size_t>> sReported; /* (region, offset) already detailed */
+size_t sReportedBefore = 0;
+
 
 double NowMs() {
     using namespace std::chrono;
@@ -204,8 +210,13 @@ size_t Compare(const char* name, const std::vector<uint8_t>& a, const std::vecto
             i++;
         }
         bad += i - start;
-        if (sReportBudget > 0) {
-            sReportBudget--;
+        /* detail the first mismatching frames, and after that every place
+         * that hasn't mismatched before */
+        const bool fresh = sReported.insert(std::make_pair(std::string(name), start)).second && sReported.size() < 2000;
+        if (sReportBudget > 0 || fresh) {
+            if (sReportBudget > 0) {
+                sReportBudget--;
+            }
             char what[256] = "";
             void* payload;
             size_t psize;
@@ -295,6 +306,24 @@ void MaskDrawingState(Snapshot& s) {
         for (auto& d : MoreDrawingState()) {
             maskIn(*r, base, d.first, d.second, false);
         }
+        /* Object visibility flags that per-camera drawing code sets and only
+         * drawing code reads (code_80086E70.c func_8008A1D0/func_8008A364:
+         * hot-air balloon, chain chomps, boos, hedgehogs, smoke particles);
+         * race logic recomputes them from all cameras before reading them
+         * (func_8008A6DC). */
+        for (int i = 0; i < OBJECT_LIST_SIZE; i++) {
+            uintptr_t a = (uintptr_t) &gObjectList[i].status, b = (uintptr_t) base;
+            if (a >= b && a + sizeof(s32) <= b + r->size()) {
+                s32 st;
+                memcpy(&st, r->data() + (a - b), sizeof(st));
+                st &= ~(0x00100000 | 0x00040000 | 0x00020000);
+                memcpy(r->data() + (a - b), &st, sizeof(st));
+            }
+        }
+        /* lightning flash progress (menu_items.c func_8009E2F0): started by the
+         * logic, advanced only by drawing, read only by drawing */
+        maskIn(*r, base, D_8018E838, sizeof(s8) * 4, false);
+        maskIn(*r, base, D_8018E840, sizeof(s32) * 4, false);
         /* Lakitu faces the camera: OLakitu::Draw sets its orientation. */
         for (int i = 0; i < 4; i++) {
             s32 idx = gIndexLakituList[i];
@@ -543,6 +572,7 @@ void Rollback_SyncTestEndFrame(void) {
     dumpSky("after restore");
     sChecks++;
     sReportBudget = (sMismatches < 60) ? 12 : 0; /* lines per mismatching frame */
+    sReportedBefore = sReported.size();
     MaskDrawingState(real);
     MaskDrawingState(resim);
     if (memcmp(&realCounts, &resimCounts, sizeof(realCounts)) != 0 && sReportBudget > 0) {
@@ -558,7 +588,7 @@ void Rollback_SyncTestEndFrame(void) {
                  Compare("roots", real.roots, resim.roots, 0);
     if (bad) {
         sMismatches++;
-        if (sMismatches <= 20 || sMismatches % 100 == 0) {
+        if (sMismatches <= 20 || sMismatches % 100 == 0 || sReported.size() != sReportedBefore) {
             LogLine("MISMATCH after frame %ld (resim from %ld): %zu bytes", sTick, from, bad);
         }
     }
