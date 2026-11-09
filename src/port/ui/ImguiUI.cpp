@@ -1,3 +1,4 @@
+#include "OnlineWindow.h"
 #include "ImguiUI.h"
 #include "UIWidgets.h"
 #include "ResolutionEditor.h"
@@ -81,6 +82,7 @@ class NetplayStatusOverlay : public Ship::GuiWindow {
     }
 };
 std::shared_ptr<Ship::GuiWindow> mNetplayStatus;
+std::shared_ptr<Ship::GuiWindow> mOnlineWindow;
 
 // std::shared_ptr<GameMenuBar> mGameMenuBar;
 std::shared_ptr<PortMenu> mPortMenu;
@@ -143,6 +145,8 @@ void SetupGuiElements() {
 
     mNetplayStatus = std::make_shared<NetplayStatusOverlay>("gNetplayStatusOverlay", true, "Netplay Status");
     gui->AddGuiWindow(mNetplayStatus);
+    mOnlineWindow = std::make_shared<OnlineWindow>("gOnlineWindow", true, "Play Online");
+    gui->AddGuiWindow(mOnlineWindow);
 }
 
 void Destroy() {
@@ -155,6 +159,7 @@ void Destroy() {
     mTrackPropertiesWindow = nullptr;
     mContentBrowserWindow = nullptr;
     mNetplayStatus = nullptr;
+    mOnlineWindow = nullptr;
 }
 
 std::string GetWindowButtonText(const char* text, bool menuOpen) {

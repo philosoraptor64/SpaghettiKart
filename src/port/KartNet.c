@@ -1,3 +1,9 @@
+/* iOS build? PLATFORM_IOS comes from CMake for iOS builds, but macOS's
+ * <mach-o/loader.h> (included below for the rollback probe) also defines a
+ * PLATFORM_IOS constant, so decide before any include. */
+#if defined(PLATFORM_IOS)
+#define KARTNET_IOS 1
+#endif
 #include "KartNet.h"
 
 #include <errno.h>
@@ -11,6 +17,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -79,6 +86,10 @@ static int sRaceRequested = 0;
 static unsigned long sTick = 0;      /* netplay frame, 0 = the race-request frame */
 static unsigned long sMaxTicks = 0;  /* 0 = unlimited */
 static void LoadReplay(const char* path);
+static int UiLogHook(const char* line);
+static void SetWait(double seconds, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+static int sUiSock = -1; /* Online screen: socket the room-code lookup found the peer on */
+static struct sockaddr_in sUiPeer;
 static int sBot = 0;
 static int sBotDrift = 0; /* MK64_NET_BOT_DRIFT=1: the bot also drifts */
 static long sBotQuitAt = 0; /* MK64_NET_BOT_QUIT=n: session bot quits each race n ticks in */
@@ -203,7 +214,7 @@ static long EnvInt(const char* name, long def) {
 }
 
 static const char* DocumentsPath(const char* path, char* out, size_t outSize) {
-#if defined(PLATFORM_IOS)
+#if defined(KARTNET_IOS)
     const char* home = getenv("HOME");
     if (path && *path && path[0] != '/' && home) {
         snprintf(out, outSize, "%s/Documents/%s", home, path);
@@ -215,7 +226,7 @@ static const char* DocumentsPath(const char* path, char* out, size_t outSize) {
     return path;
 }
 
-#if defined(PLATFORM_IOS)
+#if defined(KARTNET_IOS)
 /* iOS apps get no environment from a home-screen launch: read KEY=VALUE lines
  * from Documents/netplay.cfg (environment variables still win). */
 static void LoadConfigFile(void) {
@@ -294,7 +305,7 @@ static u32 Get32(const u8* p) {
 /* ------------------------------------------------------------------------ */
 /* Packets                                                                   */
 
-enum { PKT_HELLO = 1, PKT_CONFIG = 2, PKT_START = 3, PKT_PAUSE = 5 }; /* inputs: n64net_input packets */
+enum { PKT_HELLO = 1, PKT_CONFIG = 2, PKT_START = 3, PKT_PAUSE = 5, PKT_BYE = 6 }; /* inputs: n64net_input packets */
 static const u8 kMagic[4] = { 'M', 'K', 'N', '1' };
 
 static void SendNow(const u8* buf, size_t len) {
@@ -450,6 +461,13 @@ static void HandlePacket(const u8* buf, size_t len, const struct sockaddr_in* fr
             if (sIsHost && sState == NET_HANDSHAKE) {
                 sState = NET_RUNNING;
                 Log("guest acknowledged the config; starting");
+            }
+            break;
+        case PKT_BYE:
+            if (sState == NET_HANDSHAKE || sState == NET_RUNNING) {
+                Log("the other player left the session");
+                SetWait(6, "The other player left");
+                sState = NET_DONE;
             }
             break;
         case PKT_PAUSE:
@@ -659,7 +677,7 @@ static void LoadPlayback(const char* path) {
 
 static void Init(void) {
     sInitDone = 1;
-#if defined(PLATFORM_IOS)
+#if defined(KARTNET_IOS)
     LoadConfigFile();
 #endif
     const char* playback = getenv("MK64_NET_PLAYBACK");
@@ -742,6 +760,17 @@ static void Init(void) {
     }
 
 
+    if (sUiSock >= 0) {
+        /* Online screen: the room-code lookup already found the peer on this socket */
+        sSock = sUiSock;
+        sUiSock = -1;
+        fcntl(sSock, F_SETFL, fcntl(sSock, F_GETFL, 0) | O_NONBLOCK);
+        sPeer = sUiPeer;
+        sHavePeer = 1;
+        sState = NET_HANDSHAKE;
+        Log("%s; waiting for the %s", sIsHost ? "hosting" : "joining", sIsHost ? "guest" : "host");
+        return;
+    }
     sSock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sSock < 0) {
         Log("socket() failed: %s", strerror(errno));
@@ -814,6 +843,354 @@ static void Init(void) {
                 sIsHost ? "" : ", peer ", sIsHost ? "" : getenv("MK64_NET_PEER"));
     }
     Log("%s; waiting for the %s", sIsHost ? "hosting" : "joining", sIsHost ? "guest" : "host");
+}
+
+
+/* ------------------------------------------------------------------------ */
+/* In-game Online screen (port/ui/OnlineWindow.cpp)                          */
+/*
+ * Host / Join start a session from inside the running game. The room-code
+ * lookup (n64net_rendezvous_connect, which blocks until the other player is
+ * there) runs on a background thread, so the game stays playable while the
+ * host waits, and Cancel just drops the result. Once found, KartNet starts as
+ * if from the MK64_NET_* settings (Init) on that socket, shakes hands, and
+ * both games reset to the main menu with the host's seed (CM_SessionReset):
+ * the session runs from there. Leaving, or losing the other player, ends it
+ * and the game goes back to its own menus, offline.
+ */
+enum { UI_IDLE, UI_FINDING, UI_CONNECTING, UI_SESSION };
+static volatile int sUiPhase = UI_IDLE;
+static int sFromUi = 0;             /* the current session was started from the Online screen */
+static char sUiStatus[200];
+static char sUiRoomShown[8];
+static int sUiBlocking = 0;          /* the Online screen is open: the game gets no input */
+
+typedef struct {
+    int sock;
+    int host;
+    char server[128], room[8], password[128];
+    N64NetRendezvousResult res;
+    volatile int done, ok, cancelled;
+} UiLookup;
+static UiLookup* sUiLookup = NULL;
+static pthread_mutex_t sUiLock = PTHREAD_MUTEX_INITIALIZER;
+
+static void UiSetStatus(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+static void UiSetStatus(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    pthread_mutex_lock(&sUiLock);
+    vsnprintf(sUiStatus, sizeof(sUiStatus), fmt, ap);
+    pthread_mutex_unlock(&sUiLock);
+    va_end(ap);
+}
+
+/* Rendezvous log lines while the lookup thread runs: to the screen, not the overlay. */
+static int UiLogHook(const char* line) {
+    if (sUiPhase != UI_FINDING) {
+        return 0;
+    }
+    char room[8];
+    if (sscanf(line, "n64net: room code %7s - waiting", room) == 1) {
+        pthread_mutex_lock(&sUiLock);
+        snprintf(sUiRoomShown, sizeof(sUiRoomShown), "%s", room);
+        pthread_mutex_unlock(&sUiLock);
+        UiSetStatus("Room %s is open\nWaiting for your friend to join...", room);
+    } else if (strstr(line, "different build")) {
+        UiSetStatus("Your friend has a different version of the game\nBoth of you need the same build");
+    } else if (strstr(line, "refused the password")) {
+        UiSetStatus("The room server refused the password");
+    }
+    return 1;
+}
+
+static void UiLookupLog(const char* fmt, ...) {
+    char buf[400];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (sLog) {
+        fprintf(sLog, "n64net: %s\n", buf);
+    }
+    fprintf(stderr, "KartNet: n64net: %s\n", buf);
+    UiLogHook(buf);
+}
+
+static void* UiLookupThread(void* arg) {
+    UiLookup* L = (UiLookup*) arg;
+    N64NetRendezvousConfig rc;
+    memset(&rc, 0, sizeof(rc));
+    rc.server = L->server;
+    rc.game = "mk64-us+" KARTNET_BUILD_ID;
+    rc.room = L->room[0] ? L->room : NULL;
+    rc.password = L->password[0] ? L->password : NULL;
+    rc.is_host = L->host;
+    rc.wait_secs = L->host ? 1800 : 30;
+    rc.log = UiLookupLog;
+    L->ok = n64net_rendezvous_connect(L->sock, &rc, &L->res) == 0;
+    pthread_mutex_lock(&sUiLock);
+    const int cancelled = L->cancelled;
+    L->done = 1;
+    pthread_mutex_unlock(&sUiLock);
+    if (cancelled) {
+        close(L->sock); /* nobody wants the result any more */
+        free(L);
+    }
+    return NULL;
+}
+
+int KartNet_UiPhase(void) {
+    return sUiPhase;
+}
+
+void KartNet_UiStatus(char* out, int outSize) {
+    pthread_mutex_lock(&sUiLock);
+    snprintf(out, (size_t) outSize, "%s", sUiStatus);
+    pthread_mutex_unlock(&sUiLock);
+}
+
+void KartNet_UiSetBlocking(int blocking) {
+    sUiBlocking = blocking;
+}
+
+void KartNet_UiSetVoice(int mode) {
+    setenv("MK64_NET_VOICE", mode == 2 ? "ptt" : mode == 1 ? "1" : "0", 1);
+}
+
+/* host: 1 = open a room (room may be "" for a random code), 0 = join `room`. */
+int KartNet_UiStart(int host, const char* server, const char* room, const char* password) {
+    if (sUiPhase != UI_IDLE || sState != NET_OFF || sPlayback) {
+        return 0;
+    }
+    if (!server || !*server) {
+        UiSetStatus("Set the room server first (Online settings)");
+        return 0;
+    }
+    if (!host && (!room || strlen(room) < 4)) {
+        UiSetStatus("Enter your friend's room code");
+        return 0;
+    }
+    struct sockaddr_in any;
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0 || !ParseAddr("0.0.0.0:0", &any) || bind(sock, (struct sockaddr*) &any, sizeof(any)) != 0) {
+        UiSetStatus("Could not open a network socket");
+        if (sock >= 0) {
+            close(sock);
+        }
+        return 0;
+    }
+    UiLookup* L = (UiLookup*) calloc(1, sizeof(UiLookup));
+    L->sock = sock;
+    L->host = host;
+    snprintf(L->server, sizeof(L->server), "%s", server);
+    snprintf(L->room, sizeof(L->room), "%s", room ? room : "");
+    snprintf(L->password, sizeof(L->password), "%s", password ? password : "");
+    pthread_mutex_lock(&sUiLock);
+    sUiRoomShown[0] = '\0';
+    pthread_mutex_unlock(&sUiLock);
+    UiSetStatus(host ? "Opening a room..." : "Looking for room %s...", L->room);
+    sUiLookup = L;
+    sUiPhase = UI_FINDING;
+    pthread_t t;
+    if (pthread_create(&t, NULL, UiLookupThread, L) != 0) {
+        close(sock);
+        free(L);
+        sUiLookup = NULL;
+        sUiPhase = UI_IDLE;
+        UiSetStatus("Could not start the connection");
+        return 0;
+    }
+    pthread_detach(t);
+    sFromUi = 1;
+    setenv("MK64_NET_HOST", host ? "1" : "0", 1);
+    return 1;
+}
+
+void KartNet_UiRoom(char* out, int outSize) {
+    pthread_mutex_lock(&sUiLock);
+    snprintf(out, (size_t) outSize, "%s", sUiPhase == UI_SESSION ? sRoomCode : sUiRoomShown);
+    pthread_mutex_unlock(&sUiLock);
+}
+
+static void ResetNetState(void);
+
+/* Cancel a lookup, or leave a running session. */
+void KartNet_UiStop(void) {
+    if (sUiPhase == UI_FINDING) {
+        pthread_mutex_lock(&sUiLock);
+        sUiLookup->cancelled = 1;
+        const int done = sUiLookup->done;
+        pthread_mutex_unlock(&sUiLock);
+        if (done) { /* finished in the meantime: the thread won't free it */
+            close(sUiLookup->sock);
+            free(sUiLookup);
+        }
+        sUiLookup = NULL;
+        sUiPhase = UI_IDLE;
+        sFromUi = 0;
+        UiSetStatus("Cancelled");
+        return;
+    }
+    if (sFromUi && (sState == NET_HANDSHAKE || sState == NET_RUNNING)) {
+        u8 buf[8];
+        size_t n = Header(buf, PKT_BYE);
+        for (int i = 0; i < 3; i++) {
+            SendNow(buf, n);
+        }
+        Log("left the session");
+        SetWait(4, "You left the session");
+        sState = NET_DONE;
+    }
+}
+
+/* MK64_NET_UITEST=host|join (tests): press Host / Join on the Online screen at
+ * frame MK64_NET_UITEST_AT, with MK64_NET_UITEST_SERVER/_ROOM/_PASSWORD.
+ * MK64_NET_UITEST_ROUNDS=n: after a session ends, wait MK64_NET_UITEST_AT
+ * frames again and start the next one; MK64_NET_UITEST_LEAVE=t: press Leave
+ * t ticks into each session (the host, say). */
+static void UiTestHook(void) {
+    static unsigned long frames = 0;
+    static int rounds = 0;
+    const char* what = getenv("MK64_NET_UITEST");
+    if (!what || !*what) {
+        return;
+    }
+    const long leaveAt = EnvInt("MK64_NET_UITEST_LEAVE", 0);
+    if (leaveAt > 0 && sState == NET_RUNNING && sRaceRequested && (long) sTick == leaveAt) {
+        fprintf(stderr, "KartNet: UI test: leave at tick %lu\n", sTick);
+        KartNet_UiStop();
+        return;
+    }
+    if (sUiPhase != UI_IDLE || sState != NET_OFF) {
+        frames = 0;
+        return;
+    }
+    if (rounds >= EnvInt("MK64_NET_UITEST_ROUNDS", 1)) {
+        return;
+    }
+    if (++frames < (unsigned long) EnvInt("MK64_NET_UITEST_AT", 100)) {
+        return;
+    }
+    rounds++;
+    const char* server = getenv("MK64_NET_UITEST_SERVER");
+    const char* room = getenv("MK64_NET_UITEST_ROOM");
+    const char* pw = getenv("MK64_NET_UITEST_PASSWORD");
+    fprintf(stderr, "KartNet: UI test: %s at frame %lu\n", what, frames);
+    KartNet_UiStart(strcmp(what, "host") == 0, server, room ? room : "", pw ? pw : "");
+}
+
+/* Every frame (BeginFrame): pick up a finished lookup, end a finished session. */
+static void UiUpdate(void) {
+    UiTestHook();
+    int lookupDone = 0;
+    if (sUiPhase == UI_FINDING && sUiLookup) {
+        pthread_mutex_lock(&sUiLock);
+        lookupDone = sUiLookup->done;
+        pthread_mutex_unlock(&sUiLock);
+    }
+    if (lookupDone) {
+        UiLookup* L = sUiLookup;
+        sUiLookup = NULL;
+        if (!L->ok) {
+            if (!strstr(sUiStatus, "version") && !strstr(sUiStatus, "password")) {
+                UiSetStatus("Could not connect: %s", L->res.error[0] ? L->res.error : "no answer");
+            }
+            close(L->sock);
+            free(L);
+            sUiPhase = UI_IDLE;
+            sFromUi = 0;
+            return;
+        }
+        sUiSock = L->sock;
+        sUiPeer = L->res.peer;
+        snprintf(sRoomCode, sizeof(sRoomCode), "%s", L->res.room);
+        free(L);
+        /* the session's settings (Init reads them like the test scripts' ones) */
+        setenv("MK64_NET", "1", 1);
+        setenv("MK64_NET_SESSION", "1", 1);
+#if defined(KARTNET_IOS)
+        setenv("MK64_NET_LOG", "kartnet.log", 1); /* Documents/kartnet.log (+ .rec) */
+#endif
+        sUiPhase = UI_CONNECTING;
+        UiSetStatus("Connecting to your friend...");
+        ResetNetState();
+        Init();
+        if (sState == NET_HANDSHAKE) {
+            Log("room %s: connected to %s (from the Online screen)", sRoomCode, AddrStr(&sPeer));
+        } else {
+            UiSetStatus("Could not start the session");
+            sUiPhase = UI_IDLE;
+            sFromUi = 0;
+        }
+        return;
+    }
+    if (sFromUi && sState == NET_DONE) {
+        /* session over: back to the game's own menus, offline */
+        char reason[200];
+        snprintf(reason, sizeof(reason), "%s", sWaitMsg[0] ? sWaitMsg : "The session ended");
+        for (char* c = reason; *c; c++) {
+            if (*c == '\n') {
+                *c = ' ';
+            }
+        }
+#ifdef KARTNET_VOICE
+        if (sVoiceStarted) {
+            n64net_voice_stop();
+            sVoiceStarted = 0;
+        }
+#endif
+        Log("session over: %s", reason);
+        ResetNetState();
+        sUiPhase = UI_IDLE;
+        sFromUi = 0;
+        UiSetStatus("%s", reason);
+        CM_RequestReset();
+    }
+}
+
+/* Back to "no netplay": what a new session must not inherit. */
+static void ResetNetState(void) {
+    if (sNet) {
+        n64net_input_destroy(sNet);
+        sNet = NULL;
+    }
+    if (sSock >= 0) {
+        close(sSock);
+        sSock = -1;
+    }
+    if (sLog) {
+        fclose(sLog);
+        sLog = NULL;
+    }
+    if (sRec) {
+        fclose(sRec);
+        sRec = NULL;
+    }
+    sState = NET_OFF;
+    sHavePeer = 0;
+    sRaceRequested = 0;
+    sTick = 0;
+    sMaxTicks = 0;
+    sSyncOk = sSyncBad = sStalls = 0;
+    sStallMs = 0;
+    sLastHelloMs = 0;
+    sPeerPaused = 0;
+    sInjectStart = 0;
+    sSimTick = 0;
+    sLastRecorded = -1;
+    sRbCount = sRbFrames = sRbMaxDepth = sHolds = 0;
+    sDesyncLogged = 0;
+    gKartNetHoldFrame = 0;
+    sSession = 0;
+    sRbActive = 0;
+    sRaceStartTick = -1;
+    sLastCeiling = -1;
+    for (int i = 0; i < DETAIL_RING; i++) {
+        sDetailTick[i] = -1;
+    }
+    sWaitMsg[0] = '\0';
+    sWaitUntil = 0;
 }
 
 void KartNet_SetPaused(int paused) {
@@ -892,6 +1269,7 @@ void KartNet_BeginFrame(void) {
     if (!sInitDone) {
         Init();
     }
+    UiUpdate();
     if (sState == NET_OFF || sState == NET_DONE) {
         VoiceUpdate(); /* closes the microphone after a disconnect */
         return;
@@ -902,8 +1280,15 @@ void KartNet_BeginFrame(void) {
      * for the handshake, so the race starts from the same state on both: a side
      * that kept running into the attract demo while waiting would carry
      * leftover state into the race and desync. */
+    const double handshakeStart = NowMs();
     while (sState == NET_HANDSHAKE) {
         double now = NowMs();
+        if (sFromUi && now - handshakeStart > 30000) {
+            Log("no answer from the other player; giving up");
+            SetWait(6, "Your friend's game didn't answer");
+            sState = NET_DONE;
+            break;
+        }
         if (now - sLastHelloMs > 100) {
             sLastHelloMs = now;
             if (sIsHost) {
@@ -945,6 +1330,13 @@ void KartNet_BeginFrame(void) {
         }
         Log("session started (boot frame %lu): menus in lockstep, races with %s", sBootFrames,
             sRollback ? "rollback" : "lockstep");
+        if (sFromUi) {
+            /* started from the Online screen: the two games were in different
+             * places; both go to the main menu from the same state now */
+            CM_SessionReset((u16) sSeed);
+            sUiPhase = UI_SESSION;
+            UiSetStatus("Connected: room %s", sRoomCode);
+        }
     }
     if (sSession && sRaceRequested) {
         /* The menus load the debug-mode setting from each device's own
@@ -1181,6 +1573,9 @@ static void NetLogCb(const char* fmt, ...) {
     va_end(ap);
     Log("n64net: %s", buf);
     char room[8];
+    if (UiLogHook(buf)) {
+        return;
+    }
     if (sscanf(buf, "n64net: room code %7s - waiting", room) == 1) {
         snprintf(sRoomCode, sizeof(sRoomCode), "%s", room);
         SetWait(0, "Room %s\nWaiting for the other player to join...", sRoomCode);
@@ -1539,6 +1934,9 @@ static void GateTransition(void) {
 void KartNet_OverrideInput(void) {
     if (!sInitDone) {
         Init();
+    }
+    if (sUiBlocking && sState != NET_RUNNING) {
+        memset(gControllerPads, 0, sizeof(OSContPad) * 4); /* the Online screen has the controller */
     }
     if (sState == NET_OFF) {
         return;

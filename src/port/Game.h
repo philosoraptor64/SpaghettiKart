@@ -35,8 +35,9 @@ extern Registry<ActorInfo, const SpawnParams&> gActorRegistry;
 extern Registry<ItemInfo> gItemRegistry;
 extern DataRegistry<RandomItemTable> gItemTableRegistry;
 World* GetWorld(void); // Retrieve the world instance
-void CM_RequestReset(void); // Queue a game reset; applied at the top of the next game frame
 #endif
+void CM_RequestReset(void); // Queue a game reset; applied at the top of the next game frame
+void CM_SessionReset(u16 seed); // Online session start: reset to the main menu now, same state on both devices
 // NOLINTBEGIN(readability-identifier-naming)
 
 void Graphics_PushFrame(Gfx* pool);

@@ -62,6 +62,17 @@ void KartNet_SetPaused(int paused);
 int KartNet_WantsLocalView(void);
 /* 1 while the race logic advances the screen fades (menu_items.c netplay_advance_screen_transitions) */
 int KartNet_TransitionsInLogic(void);
+
+/* In-game Online screen (port/ui/OnlineWindow.cpp). Phases: */
+enum { KARTNET_UI_IDLE, KARTNET_UI_FINDING, KARTNET_UI_CONNECTING, KARTNET_UI_SESSION };
+int KartNet_UiPhase(void);
+/* host 1: open a room (room "" = random code); host 0: join `room`. Returns 1 if started. */
+int KartNet_UiStart(int host, const char* server, const char* room, const char* password);
+void KartNet_UiStop(void); /* cancel the room lookup, or leave the session */
+void KartNet_UiStatus(char* out, int outSize);
+void KartNet_UiRoom(char* out, int outSize); /* the room code (once known) */
+void KartNet_UiSetBlocking(int blocking);  /* 1 while the screen is open: the game gets no input */
+void KartNet_UiSetVoice(int mode);         /* 0 off, 1 open mic, 2 push-to-talk (next session) */
 /* render_screens: the screen index to draw as (the full-screen view's spare
  * slot draws as the local player's screen). */
 int KartNet_ScreenIndex(int slot);

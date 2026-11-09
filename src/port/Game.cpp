@@ -45,6 +45,7 @@ extern "C" {
 #include "audio/external.h"
 #include "racing/render_courses.h"
 #include "menus.h"
+#include "buffers/random.h"
 #include "update_objects.h"
 #include "spawn_players.h"
 #include "src/enhancements/collision_viewer.h"
@@ -934,11 +935,40 @@ void CM_RequestReset(void) {
 // press landing mid-fade was re-advanced by the in-flight transition, and a
 // repeat press rewrote the gamestate it had already set, which the != guard
 // in main.c swallows while the audio fade still runs (silent no-op).
+static void ResetToMenus(bool online);
 static void ApplyPendingReset() {
     if (!sResetRequested.exchange(false)) {
         return;
     }
+    ResetToMenus(false);
+}
 
+/* Online session start (KartNet, from the Online screen): both games go to the
+ * main menu from the same state at the same tick. Besides the normal reset,
+ * reset what the menus remember from earlier play and seed the race RNG with
+ * the host's seed; land on the main menu whatever the skip-intro setting. */
+extern "C" void CM_SessionReset(u16 seed) {
+    sResetRequested.store(false);
+    ResetToMenus(true);
+    gRandomSeed16 = seed;
+    gModeSelection = GRAND_PRIX;
+    gCCSelection = CC_50;
+    gPlayerCount = 2;
+    gPlayerCountSelection1 = 2;
+    gScreenModeSelection = SCREEN_MODE_2P_SPLITSCREEN_HORIZONTAL;
+    for (s32 i = 0; i < 4; i++) {
+        gCharacterSelections[i] = (s8) i;
+    }
+    gIsInQuitToMenuTransition = 0;
+    gQuitToMenuTransitionCounter = 0;
+    gCupSelection = MUSHROOM_CUP;
+    gCourseIndexInCup = 0;
+    /* karts left over from earlier play (a race, the attract demo): race setup
+     * rebuilds them, but until then they would differ between the devices */
+    memset(gPlayers, 0, sizeof(Player) * NUM_PLAYERS);
+}
+
+static void ResetToMenus(bool online) {
     // The FROM_QUIT gamestates run identical inits; alternating keeps
     // gGamestateNext != gGamestate true so every press re-enters the menus.
     gGamestateNext = (gGamestate == MAIN_MENU_FROM_QUIT) ? START_MENU_FROM_QUIT : MAIN_MENU_FROM_QUIT;
@@ -979,6 +1009,9 @@ static void ApplyPendingReset() {
     // Debug mode override gSkipIntro
     if (CVarGetInteger("gEnableDebugMode", 0) == true) {
         gMenuSelection = START_MENU;
+    }
+    if (online) {
+        gMenuSelection = MAIN_MENU; // per-device settings must not decide where a session starts
     }
     // Re-enter through the intro's own transition protocol (see HM_TickIntro):
     // FADE_MODE_LOGO makes setup_menus rebuild the menu items and start a
