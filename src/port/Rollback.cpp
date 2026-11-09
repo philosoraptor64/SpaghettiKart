@@ -324,6 +324,80 @@ static std::vector<Snapshot> sSlots;
 static double sSlotSaveMs = 0, sSlotLoadMs = 0;
 static unsigned long sSlotSaves = 0, sSlotLoads = 0;
 
+} // extern "C"
+
+namespace {
+
+/* Drawing-only state (what SyncTest masks): a rollback must not bring back old
+ * values of it. Rendering writes it in frame N and reads it again in N+1
+ * (e.g. the kart textures and palettes prepared for the next frame), and the
+ * re-simulated frames don't draw, so after a rollback the next frame would
+ * draw from the snapshot's stale copy: wrong textures, objects drawn with
+ * other matrices. Keep the live values across the rollback instead. */
+struct DrawKeep {
+    std::vector<std::pair<uint8_t*, size_t>> regions;
+    std::vector<uint8_t> bytes;
+    std::vector<uint8_t> players, playerMask; /* gPlayers: only the drawing fields */
+};
+DrawKeep sDrawKeep;
+
+std::vector<std::pair<uint8_t*, size_t>> DrawingRegions() {
+    std::vector<std::pair<uint8_t*, size_t>> r = {
+        { (uint8_t*) gScreenContexts, sizeof(ScreenContext) * 4 },
+        { (uint8_t*) &D_802BFB80, sizeof(D_802BFB80) },
+        { (uint8_t*) gEncodedKartTexture, sizeof(gEncodedKartTexture[0]) * 2 },
+        { (uint8_t*) gPlayerPalettesList, sizeof(gPlayerPalettesList) },
+        { (uint8_t*) gPlayersToRenderScreenId, sizeof(s16) * 8 },
+    };
+    for (int i = 0; i < 4; i++) {
+        s32 idx = gIndexLakituList[i];
+        if (idx > 0 && idx < OBJECT_LIST_SIZE) {
+            r.push_back({ (uint8_t*) &gObjectList[idx].orientation, sizeof(gObjectList[idx].orientation) });
+        }
+    }
+    if (SimHeap_Base()) {
+        for (auto& cam : GetWorld()->Cameras) {
+            r.push_back({ (uint8_t*) cam->GetPerspMatrix(), sizeof(Mtx) });
+            r.push_back({ (uint8_t*) cam->GetLookAtMatrix(), sizeof(Mtx) });
+        }
+    }
+    return r;
+}
+
+} // namespace
+
+extern "C" {
+
+void Rollback_KeepDrawingState(void) {
+    int scope = SimHeap_Suspend();
+    sDrawKeep.regions = DrawingRegions();
+    sDrawKeep.bytes.clear();
+    for (auto& [p, n] : sDrawKeep.regions) {
+        sDrawKeep.bytes.insert(sDrawKeep.bytes.end(), p, p + n);
+    }
+    const size_t pn = sizeof(Player) * NUM_PLAYERS;
+    if (sDrawKeep.playerMask.size() != pn) {
+        sDrawKeep.playerMask.assign(pn, 0xFF);
+        KartNet_MaskDrawingFields(sDrawKeep.playerMask.data()); /* zero = a drawing byte */
+    }
+    sDrawKeep.players.assign((uint8_t*) gPlayers, (uint8_t*) gPlayers + pn);
+    SimHeap_Resume(scope);
+}
+
+void Rollback_RestoreDrawingState(void) {
+    size_t off = 0;
+    for (auto& [p, n] : sDrawKeep.regions) {
+        memcpy(p, sDrawKeep.bytes.data() + off, n);
+        off += n;
+    }
+    uint8_t* live = (uint8_t*) gPlayers;
+    for (size_t i = 0; i < sDrawKeep.players.size(); i++) {
+        if (sDrawKeep.playerMask[i] == 0) {
+            live[i] = sDrawKeep.players[i];
+        }
+    }
+}
+
 int Rollback_InitSlots(int count) {
     if (!Rollback_Supported()) {
         return 0;

@@ -1225,7 +1225,11 @@ static void NetFrame(const NetPad* local) {
 
     sSimTick = sTick;
     n64net_rollback_callbacks cb = { RbSave, RbLoad, RbAdvance, NULL, RB_SLOTS };
+    Rollback_KeepDrawingState();
     int depth = n64net_rollback_frame(sNet, (uint32_t) sTick, &cb);
+    if (depth > 0) {
+        Rollback_RestoreDrawingState(); /* the next frame draws from what the last one drew */
+    }
     if (depth > 0) {
         sRbCount++;
         sRbFrames += (unsigned long) depth;

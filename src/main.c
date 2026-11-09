@@ -87,7 +87,9 @@ Player* gPlayerEight = &gPlayers[7];
 
 UNUSED s32 D_800FD850[3];
 MK_SNAPSHOT_OUTSIDE struct GfxPool gGfxPools[2];
-struct GfxPool* gGfxPool;
+/* Outside the snapshot: set for the frame before the controllers are read (and
+ * a rollback runs); restoring an old value would switch buffers mid-frame. */
+MK_SNAPSHOT_OUTSIDE struct GfxPool* gGfxPool;
 
 UNUSED s32 gfxPool_padding; // is this necessary?
 struct VblankHandler gGameVblankHandler;
@@ -133,7 +135,7 @@ UNUSED f32 D_80150154;
 struct D_80150158 gD_80150158[16];
 MK_SNAPSHOT_OUTSIDE Gfx* gDisplayListHead;
 
-struct SPTask* gGfxSPTask;
+MK_SNAPSHOT_OUTSIDE struct SPTask* gGfxSPTask;
 s32 D_801502A0;
 s32 D_801502A4;
 u16* gPhysicalFramebuffers[3];
