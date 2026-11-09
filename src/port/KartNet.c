@@ -54,10 +54,7 @@ extern OSContPad gControllerPads[4];
 
 enum { NET_OFF, NET_HANDSHAKE, NET_RUNNING, NET_DONE };
 
-#define RING 256          /* input ring (ticks); must exceed delay + 16 */
-#define REDUNDANT 16      /* inputs repeated in every packet */
 #define HASH_EVERY 30     /* frames between state-hash checkpoints */
-#define HASH_SLOTS 16
 #define WAIT_TIMEOUT_MS 20000   /* give up if the peer is silent this long (and not paused) */
 #define PAUSED_TIMEOUT_MS 600000 /* ... or paused (app in the background) this long */
 #define START_BOOT_FRAME 30      /* both sides wait here, so they start from identical states */
@@ -92,17 +89,7 @@ typedef struct {
     s8 x, y;
 } NetPad;
 
-static NetPad sInputs[2][RING];
-static long sKnownTick[2][RING]; /* tick stored in the slot, -1 = empty */
-static long sRemoteContig = -1;  /* highest remote tick with all earlier ticks known */
-
-typedef struct {
-    long tick;
-    unsigned long long hash;
-} Checkpoint;
-static Checkpoint sLocalHashes[HASH_SLOTS];
-static Checkpoint sRemoteHashes[HASH_SLOTS];
-static unsigned long sSyncOk = 0, sSyncBad = 0, sStalls = 0;
+static unsigned long sSyncOk = 0, sSyncBad = 0, sStalls = 0; /* sync results for the done line */
 static double sStallMs = 0;
 static double sLastHelloMs = 0;
 static int sPeerPaused = 0;
@@ -111,37 +98,17 @@ static int sFullView = 1; /* MK64_NET_VIEW=full (default) or split */
  * both split screens first and undoes the extra draw (the first version). */
 static int sSingleView = 1;
 static int sInjectStart = 0; /* press Start once after returning from the background */
-static FILE* sDump = NULL; /* MK64_NET_DUMP: raw gPlayers at each checkpoint */
 
-/* Timing: round-trip time, frame advantage and the adaptive input delay.
- * Each side schedules its own inputs `delay` frames ahead, so each side's delay
- * only protects its PEER from waiting. Both use max(own wish, peer's wish); the
- * wish comes from the recent round-trip times (up at once, down slowly). A side
- * can change its delay alone without breaking determinism: the inputs are
- * exchanged, and a tick is never scheduled twice (see ScheduleLocal). */
-#define RTT_SAMPLES 90
-static double sRtt[RTT_SAMPLES];
-static int sRttCount = 0, sRttNext = 0;
-static u32 sPeerStamp = 0, sLastEcho = 0;
-static double sPeerStampAt = 0;
-static int sHavePeerStamp = 0;
-static long sPeerTick = -1;
-static double sPeerTickAt = 0;
-static double sFrameMs = 1000.0 / 30, sLastFrameAt = 0, sAdvAvg = 0;
-static int sAdaptive = 1, sMinDelay = 2, sMaxDelay = 6;
-static int sWantDelay = 2, sPeerWantDelay = 0, sCurDelay = 2;
-static double sLowSince = 0;
-static long sLastScheduled = -1; /* highest tick holding a local input */
-static double sRttMaxWindow = 0;
 
-/* Rollback (MK64_NET_ROLLBACK=1): inputs travel through n64net_input
- * (prediction, misprediction -> rollback, time sync, sync check); KartNet keeps
- * the handshake. Race setup isn't rollback-safe (setup objects are created in
+/* Inputs travel through n64net_input (input delay, prediction, misprediction
+ * -> rollback, time sync, sync check); KartNet keeps the handshake. Rollback is
+ * on by default (MK64_NET_ROLLBACK=0, or no snapshot support: lockstep).
+ * Race setup isn't rollback-safe (setup objects are created in
  * the first frames), so the first MK64_NET_ROLLBACK_FROM ticks run in lockstep. */
 #define RB_SLOTS 16
 #define RB_HASHES 64
 static int sRollback = 0;
-static int sLegacy = 0; /* MK64_NET_LEGACY=1: KartNet's own lockstep exchange (fallback until the phone test) */
+static int sAdaptive = 1, sMaxDelay = 3; /* n64net auto delay: host DELAY .. sMaxDelay */
 static uint32_t sRbWindow = 8;
 static long sRbFrom = 60;
 static n64net_input* sNet = NULL;
@@ -268,38 +235,18 @@ static unsigned long long Fnv1a(unsigned long long h, const void* data, size_t l
 }
 
 /* Little-endian packing (both ends are arm64/x86 today, but be explicit). */
-static void Put16(u8* p, u16 v) {
-    p[0] = v & 0xFF;
-    p[1] = v >> 8;
-}
 static void Put32(u8* p, u32 v) {
     for (int i = 0; i < 4; i++) {
         p[i] = (v >> (8 * i)) & 0xFF;
     }
 }
-static void Put64(u8* p, unsigned long long v) {
-    for (int i = 0; i < 8; i++) {
-        p[i] = (v >> (8 * i)) & 0xFF;
-    }
-}
-static u16 Get16(const u8* p) {
-    return (u16) (p[0] | (p[1] << 8));
-}
 static u32 Get32(const u8* p) {
     return (u32) p[0] | ((u32) p[1] << 8) | ((u32) p[2] << 16) | ((u32) p[3] << 24);
 }
-static unsigned long long Get64(const u8* p) {
-    unsigned long long v = 0;
-    for (int i = 7; i >= 0; i--) {
-        v = (v << 8) | p[i];
-    }
-    return v;
-}
-
 /* ------------------------------------------------------------------------ */
 /* Packets                                                                   */
 
-enum { PKT_HELLO = 1, PKT_CONFIG = 2, PKT_START = 3, PKT_INPUT = 4, PKT_PAUSE = 5 };
+enum { PKT_HELLO = 1, PKT_CONFIG = 2, PKT_START = 3, PKT_PAUSE = 5 }; /* inputs: n64net_input packets */
 static const u8 kMagic[4] = { 'M', 'K', 'N', '1' };
 
 static void SendNow(const u8* buf, size_t len) {
@@ -409,99 +356,6 @@ static void SendPause(int paused) {
     }
 }
 
-static void SendInputs(long top) {
-    u8 buf[512];
-    size_t n = Header(buf, PKT_INPUT);
-    long first = top - (REDUNDANT - 1);
-    if (first < 0) {
-        first = 0;
-    }
-    buf[n++] = (u8) sLocalPlayer;
-    Put32(buf + n, (u32) first);
-    n += 4;
-    buf[n++] = (u8) (top - first + 1);
-    for (long t = first; t <= top; t++) {
-        const NetPad* p = &sInputs[sLocalPlayer][t % RING];
-        Put16(buf + n, p->button);
-        buf[n + 2] = (u8) p->x;
-        buf[n + 3] = (u8) p->y;
-        n += 4;
-    }
-    /* The latest few state-hash checkpoints ride along. */
-    u8* countAt = buf + n++;
-    u8 count = 0;
-    for (int i = 0; i < HASH_SLOTS && count < 4; i++) {
-        const Checkpoint* c = &sLocalHashes[i];
-        if (c->tick >= 0 && c->tick + 4 * HASH_EVERY >= (long) sTick) {
-            Put32(buf + n, (u32) c->tick);
-            Put64(buf + n + 4, c->hash);
-            n += 12;
-            count++;
-        }
-    }
-    *countAt = count;
-    /* Timing: our tick, a time stamp, the peer's last stamp echoed back with
-     * how long we held it (-> round-trip time), and our wished input delay. */
-    double now = NowMs();
-    Put32(buf + n, (u32) sTick);
-    Put32(buf + n + 4, (u32) (long long) now);
-    Put32(buf + n + 8, sHavePeerStamp ? sPeerStamp : 0);
-    Put32(buf + n + 12, sHavePeerStamp ? (u32) (now - sPeerStampAt) : 0xFFFFFFFFu);
-    buf[n + 16] = (u8) sWantDelay;
-    n += 17;
-    SendRaw(buf, n);
-}
-
-static void AddRtt(double ms) {
-    sRtt[sRttNext] = ms;
-    sRttNext = (sRttNext + 1) % RTT_SAMPLES;
-    if (sRttCount < RTT_SAMPLES) {
-        sRttCount++;
-    }
-    if (ms > sRttMaxWindow) {
-        sRttMaxWindow = ms;
-    }
-}
-
-static int CmpDouble(const void* a, const void* b) {
-    double x = *(const double*) a, y = *(const double*) b;
-    return (x > y) - (x < y);
-}
-
-/* Percentile (0..1) of the recent round-trip times; 0 if none yet. */
-static double RttPercentile(double q) {
-    if (sRttCount == 0) {
-        return 0;
-    }
-    double tmp[RTT_SAMPLES];
-    memcpy(tmp, sRtt, sizeof(double) * (size_t) sRttCount);
-    qsort(tmp, (size_t) sRttCount, sizeof(double), CmpDouble);
-    int i = (int) (q * (sRttCount - 1) + 0.5);
-    return tmp[i];
-}
-
-static void CompareCheckpoint(long tick) {
-    const Checkpoint* l = &sLocalHashes[(tick / HASH_EVERY) % HASH_SLOTS];
-    const Checkpoint* r = &sRemoteHashes[(tick / HASH_EVERY) % HASH_SLOTS];
-    if (l->tick != tick || r->tick != tick) {
-        return;
-    }
-    if (l->hash == r->hash) {
-        sSyncOk++;
-        if (tick % (HASH_EVERY * 10) == 0) {
-            Log("sync tick %ld OK %016llx (ok %lu, desync %lu, stalls %lu / %.0f ms)", tick, l->hash, sSyncOk,
-                sSyncBad, sStalls, sStallMs);
-            Log("# timing: rtt median %.0f p90 %.0f max %.0f ms, delay %d (wishes %d/%d), frame %.1f ms, ahead %.2f",
-                RttPercentile(0.5), RttPercentile(0.9), sRttMaxWindow, sCurDelay, sWantDelay, sPeerWantDelay, sFrameMs,
-                sAdvAvg);
-            sRttMaxWindow = 0;
-        }
-    } else {
-        sSyncBad++;
-        Log("DESYNC tick %ld local %016llx remote %016llx", tick, l->hash, r->hash);
-    }
-}
-
 static void HandlePacket(const u8* buf, size_t len, const struct sockaddr_in* from) {
     if (len < 5 || memcmp(buf, kMagic, 4) != 0) {
         return;
@@ -550,86 +404,6 @@ static void HandlePacket(const u8* buf, size_t len, const struct sockaddr_in* fr
                 Log("guest acknowledged the config; starting");
             }
             break;
-        case PKT_INPUT: {
-            if (len < 6) {
-                return;
-            }
-            if (sIsHost && sState == NET_HANDSHAKE) {
-                sState = NET_RUNNING; /* the START was lost, but the guest is running */
-                Log("guest is running (start ack lost); starting");
-            }
-            if (sPeerPaused) {
-                sPeerPaused = 0;
-                Log("peer resumed");
-            }
-            int player = p[0];
-            if (player != 1 - sLocalPlayer) {
-                return;
-            }
-            long first = (long) Get32(p + 1);
-            int count = p[5];
-            p += 6;
-            len -= 6;
-            if (len < (size_t) count * 4) {
-                return;
-            }
-            for (int i = 0; i < count; i++) {
-                long t = first + i;
-                if (t > sRemoteContig + RING - 32) {
-                    break; /* far ahead; impossible in lockstep, ignore */
-                }
-                NetPad* pad = &sInputs[player][t % RING];
-                if (sKnownTick[player][t % RING] != t) {
-                    pad->button = Get16(p);
-                    pad->x = (s8) p[2];
-                    pad->y = (s8) p[3];
-                    sKnownTick[player][t % RING] = t;
-                }
-                p += 4;
-            }
-            len -= (size_t) count * 4;
-            while (sKnownTick[player][(sRemoteContig + 1) % RING] == sRemoteContig + 1) {
-                sRemoteContig++;
-            }
-            if (len >= 1) {
-                int hashes = p[0];
-                p++;
-                len--;
-                for (int i = 0; i < hashes && len >= 12; i++) {
-                    long tick = (long) Get32(p);
-                    Checkpoint* c = &sRemoteHashes[(tick / HASH_EVERY) % HASH_SLOTS];
-                    if (c->tick != tick) {
-                        c->tick = tick;
-                        c->hash = Get64(p + 4);
-                        CompareCheckpoint(tick);
-                    }
-                    p += 12;
-                    len -= 12;
-                }
-            }
-            if (len >= 17) {
-                double now = NowMs();
-                long peerTick = (long) Get32(p);
-                u32 echo = Get32(p + 8);
-                u32 held = Get32(p + 12);
-                if (peerTick > sPeerTick) {
-                    sPeerTick = peerTick;
-                    sPeerTickAt = now;
-                }
-                sPeerStamp = Get32(p + 4);
-                sPeerStampAt = now;
-                sHavePeerStamp = 1;
-                if (held != 0xFFFFFFFFu && echo != sLastEcho) {
-                    sLastEcho = echo;
-                    double rtt = (double) (u32) ((u32) (long long) now - echo) - (double) held;
-                    if (rtt >= 0 && rtt < 5000) {
-                        AddRtt(rtt);
-                    }
-                }
-                sPeerWantDelay = p[16];
-            }
-            break;
-        }
         case PKT_PAUSE:
             if (len >= 1 && sPeerPaused != (p[0] != 0)) {
                 sPeerPaused = p[0] != 0;
@@ -727,10 +501,6 @@ static void Init(void) {
         sLog = fopen(logPath, "w");
     }
 
-    const char* dumpPath = DocumentsPath(getenv("MK64_NET_DUMP"), pathBuf, sizeof(pathBuf));
-    if (dumpPath && *dumpPath) {
-        sDump = fopen(dumpPath, "wb");
-    }
     sIsHost = EnvInt("MK64_NET_HOST", 0) != 0;
     sLocalPlayer = sIsHost ? 0 : 1;
     sDelay = (int) EnvInt("MK64_NET_DELAY", 2);
@@ -753,7 +523,7 @@ static void Init(void) {
         sFullView = !(view && strcmp(view, "split") == 0);
         sSingleView = !(view && strcmp(view, "double") == 0);
     }
-    sRollback = EnvInt("MK64_NET_ROLLBACK", 0) != 0 && Rollback_Supported();
+    sRollback = EnvInt("MK64_NET_ROLLBACK", 1) != 0 && Rollback_Supported();
     sRbWindow = (uint32_t) EnvInt("MK64_NET_ROLLBACK_WINDOW", 8);
     sRbFrom = EnvInt("MK64_NET_ROLLBACK_FROM", 60);
     if (sRollback && !SimHeap_Enable()) {
@@ -764,9 +534,8 @@ static void Init(void) {
         sVoiceMode = !v ? 0 : strcmp(v, "ptt") == 0 ? 2 : atoi(v) != 0;
         sVoiceTest = EnvInt("MK64_NET_VOICE_TEST", 0) != 0;
     }
-    sLegacy = !sRollback && EnvInt("MK64_NET_LEGACY", 0) != 0;
     sAdaptive = EnvInt("MK64_NET_ADAPTIVE", 1) != 0;
-    sMaxDelay = (int) EnvInt("MK64_NET_MAX_DELAY", sRollback ? 3 : 6);
+    sMaxDelay = (int) EnvInt("MK64_NET_MAX_DELAY", sRollback ? 3 : 6); /* lockstep needs more */
     sSimLatency = (int) EnvInt("MK64_NET_SIM_LATENCY", 0);
     sSimJitter = (int) EnvInt("MK64_NET_SIM_JITTER", 0);
     sSimLoss = (int) EnvInt("MK64_NET_SIM_LOSS", 0);
@@ -783,15 +552,6 @@ static void Init(void) {
     LoadReplay(getenv("MK64_NET_REPLAY"));
     sBotState = (unsigned int) sBot * 2654435761u + 1;
 
-    for (int pl = 0; pl < 2; pl++) {
-        for (int i = 0; i < RING; i++) {
-            sKnownTick[pl][i] = -1;
-        }
-    }
-    for (int i = 0; i < HASH_SLOTS; i++) {
-        sLocalHashes[i].tick = -1;
-        sRemoteHashes[i].tick = -1;
-    }
 
     sSock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sSock < 0) {
@@ -1003,79 +763,6 @@ static NetPad BotInput(unsigned long f) {
     return pad;
 }
 
-/* Once per frame: frame time, frame advantage and the wished input delay. */
-static void UpdateTiming(void) {
-    double now = NowMs();
-    if (sLastFrameAt > 0) {
-        double d = now - sLastFrameAt;
-        if (d > 5 && d < 45) { /* ignore stalls */
-            sFrameMs = sFrameMs * 0.95 + d * 0.05;
-        }
-    }
-    sLastFrameAt = now;
-    if (sPeerTick >= 0 && sRttCount > 0) {
-        /* Frames we are ahead of the peer (n64net time sync will act on this). */
-        double peerNow = sPeerTick + (now - sPeerTickAt + RttPercentile(0.5) / 2) / sFrameMs;
-        sAdvAvg = sAdvAvg * 0.9 + ((double) sTick - peerNow) * 0.1;
-    }
-    if (!sAdaptive || sRttCount < 10) {
-        return;
-    }
-    /* The peer's input for tick T leaves it at its tick T - delay and must arrive
-     * before we reach T: cover the one-way time of most recent packets. The
-     * measured round trip includes about a frame of polling (packets are read
-     * once per frame on each side), which the +1 frame below already covers. */
-    double oneWay = (RttPercentile(0.9) - sFrameMs) / 2;
-    if (oneWay < 0) {
-        oneWay = 0;
-    }
-    int want = (int) ceil((oneWay + 8) / sFrameMs) + 1;
-    if (want < sMinDelay) {
-        want = sMinDelay;
-    }
-    if (want > sMaxDelay) {
-        want = sMaxDelay;
-    }
-    if (want > sWantDelay) {
-        sWantDelay = want; /* worse network: protect at once */
-        sLowSince = 0;
-    } else if (want < sWantDelay) {
-        if (sLowSince == 0) {
-            sLowSince = now;
-        } else if (now - sLowSince > 8000) {
-            sWantDelay--; /* calmer for 8 s: one frame less */
-            sLowSince = now;
-        }
-    } else {
-        sLowSince = 0;
-    }
-}
-
-static int CurrentDelay(void) {
-    int d = sAdaptive ? (sWantDelay > sPeerWantDelay ? sWantDelay : sPeerWantDelay) : sDelay;
-    if (d != sCurDelay) {
-        Log("input delay %d -> %d frames at tick %lu (rtt median %.0f, p90 %.0f ms; wishes %d/%d)", sCurDelay, d, sTick,
-            RttPercentile(0.5), RttPercentile(0.9), sWantDelay, sPeerWantDelay);
-        sCurDelay = d;
-    }
-    return d;
-}
-
-/* Put this frame's local input at tick sTick + delay. Ticks are never
- * scheduled twice: after the delay grows, the gap is filled with this input;
- * after it shrinks, inputs are dropped until sTick + delay passes the last
- * scheduled tick. */
-static void ScheduleLocal(const NetPad* local, int delay) {
-    long target = (long) sTick + delay;
-    for (long t = sLastScheduled + 1; t <= target; t++) {
-        sInputs[sLocalPlayer][t % RING] = *local;
-        sKnownTick[sLocalPlayer][t % RING] = t;
-    }
-    if (target > sLastScheduled) {
-        sLastScheduled = target;
-    }
-}
-
 static unsigned long long StateHash(void);
 
 static void NetSendCb(void* user, const uint8_t* data, uint32_t size) {
@@ -1256,20 +943,6 @@ void KartNet_OverrideInput(void) {
         return;
     }
 
-    /* Schedule this frame's local input DELAY frames ahead. */
-    if (sTick == 0) {
-        sMinDelay = sDelay; /* the host's setting is the floor */
-        sWantDelay = sCurDelay = sDelay;
-        for (long t = 0; t < sDelay; t++) {
-            NetPad zero = { 0, 0, 0 };
-            sInputs[sLocalPlayer][t % RING] = zero;
-            sKnownTick[sLocalPlayer][t % RING] = t;
-        }
-        sLastScheduled = sDelay - 1;
-    }
-    if (sLegacy) {
-        UpdateTiming();
-    }
     NetPad local;
     if (sReplay) {
         NetPad none = { 0, 0, 0 };
@@ -1289,52 +962,7 @@ void KartNet_OverrideInput(void) {
             Log("opening the pause menu after returning from the background");
         }
     }
-    if (!sLegacy) {
-        NetFrame(&local);
-        return;
-    }
-    ScheduleLocal(&local, CurrentDelay());
-    long top = sLastScheduled;
-    SendInputs(top);
-
-    /* Lockstep: wait for the other player's input for this frame. */
-    int remote = 1 - sLocalPlayer;
-    if (sKnownTick[remote][sTick % RING] != (long) sTick) {
-        double start = NowMs(), lastSend = start;
-        sStalls++;
-        double lastHeard = start, lastPump = start;
-        unsigned long remoteBefore = (unsigned long) (sRemoteContig + 1);
-        while (sKnownTick[remote][sTick % RING] != (long) sTick) {
-            usleep(500);
-            Poll();
-            double now = NowMs();
-            if (now - lastPump > 50) {
-                lastPump = now;
-                SDL_PumpEvents(); /* keep the window and the iOS life cycle responsive */
-            }
-            if (now - lastSend > 16) {
-                lastSend = now;
-                SendInputs(top);
-            }
-            if (sPeerPaused || (unsigned long) (sRemoteContig + 1) != remoteBefore) {
-                lastHeard = now;
-                remoteBefore = (unsigned long) (sRemoteContig + 1);
-            }
-            if (now - lastHeard > (sPeerPaused ? PAUSED_TIMEOUT_MS : WAIT_TIMEOUT_MS)) {
-                Log("peer silent for %.0f s at tick %lu; netplay stopped", (now - lastHeard) / 1000, sTick);
-                sState = NET_DONE;
-                return;
-            }
-        }
-        sStallMs += NowMs() - start;
-    }
-
-    for (int pl = 0; pl < 2; pl++) {
-        const NetPad* p = &sInputs[pl][sTick % RING];
-        gControllerPads[pl].button = p->button;
-        gControllerPads[pl].stick_x = p->x;
-        gControllerPads[pl].stick_y = p->y;
-    }
+    NetFrame(&local);
 }
 
 /* Hash the simulation part of gPlayers. Drawing a screen writes per-screen
@@ -1492,22 +1120,6 @@ void KartNet_EndFrame(void) {
                 sHolds, sStalls, sStallMs, st.rtt_avg_usecs / 1000, st.rtt_max_usecs / 1000, sv, ld);
         }
     }
-    if (sLegacy && sTick % HASH_EVERY == 0) {
-        unsigned long long h = 1469598103934665603ull;
-        h = HashPlayers(h);
-        h = Fnv1a(h, &gRandomSeed16, sizeof(gRandomSeed16));
-        h = Fnv1a(h, &gGamestate, sizeof(gGamestate));
-        if (sDump) {
-            u32 t = (u32) sTick;
-            fwrite(&t, sizeof(t), 1, sDump);
-            fwrite(gPlayers, sizeof(Player), NUM_PLAYERS, sDump);
-            fflush(sDump);
-        }
-        Checkpoint* c = &sLocalHashes[(sTick / HASH_EVERY) % HASH_SLOTS];
-        c->tick = (long) sTick;
-        c->hash = h;
-        CompareCheckpoint((long) sTick);
-    }
     if (getenv("MK64_NET_TRACE_LAKITU") && sTick < 400 && sTick % 5 == 0) {
         Object* a = &gObjectList[gIndexLakituList[0]];
         Object* b = &gObjectList[gIndexLakituList[1]];
@@ -1525,8 +1137,6 @@ void KartNet_EndFrame(void) {
             Poll();
             if (sNet) {
                 n64net_input_resend(sNet);
-            } else {
-                SendInputs(sLastScheduled);
             }
             usleep(16000);
         }

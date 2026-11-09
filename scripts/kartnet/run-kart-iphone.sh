@@ -6,7 +6,7 @@
 # Options (environment):
 #   FRAMES=n      quit after n netplay frames (default 0 = until you close the Mac window)
 #   MAC_BOT=seed  scripted driver on the Mac (default: Mac controller/keyboard)
-#   ROLLBACK=1    rollback netcode (n64net) instead of lockstep; WINDOW=n (8)
+#   ROLLBACK=0    lockstep instead of rollback (the default); WINDOW=n (8)
 #   VOICE=1|ptt   voice chat on both sides; MAC_TONE=1 / PHONE_TONE=1 = that side sends a tone, not its mic
 #   PHONE_BOT=seed scripted driver on the phone (default: phone's controller)
 #   DELAY=n       input delay in frames (default 2)
