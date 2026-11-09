@@ -79,6 +79,8 @@ static int sSock = -1;
 static int sRecAll = 0; /* MK64_NET_REC_ALL: per-tick hash trace in the race record */
 extern void (*gRandomTrace)(void* caller);
 static void RandomTraceCb(void* caller);
+extern void (*gCameraUpdateTrace)(void* caller, int cameraIndex);
+static void CameraTraceCb(void* caller, int cameraIndex);
 static struct sockaddr_in sPeer;
 static int sHavePeer = 0;
 
@@ -713,6 +715,12 @@ static void Init(void) {
     if (logPath && *logPath) {
         sLog = fopen(logPath, "w");
         snprintf(sRecBase, sizeof(sRecBase), "%s", logPath);
+        if (playback && *playback && EnvInt("MK64_NET_REC_ALL", 0) != 0) {
+            /* replay with the trace on: per-tick lines to <log>.trace */
+            char recPath[1100];
+            snprintf(recPath, sizeof(recPath), "%s.trace", logPath);
+            sRec = fopen(recPath, "w");
+        }
         if (!(playback && *playback)) {
             char recPath[1100];
             snprintf(recPath, sizeof(recPath), "%s.rec", logPath);
@@ -748,6 +756,7 @@ static void Init(void) {
     sSession = EnvInt("MK64_NET_SESSION", 0) != 0;
     sRecAll = EnvInt("MK64_NET_REC_ALL", 0) != 0;
     gRandomTrace = sRecAll ? RandomTraceCb : NULL;
+    gCameraUpdateTrace = sRecAll ? CameraTraceCb : NULL;
     sMenuDelayCeiling = (int) EnvInt("MK64_NET_MENU_MAX_DELAY", 6);
     sRbWindow = (uint32_t) EnvInt("MK64_NET_ROLLBACK_WINDOW", 8);
     sRbFrom = EnvInt("MK64_NET_ROLLBACK_FROM", 60);
@@ -1670,6 +1679,17 @@ static void RandomTraceCb(void* caller) {
     }
 }
 
+static void CameraTraceCb(void* caller, int cameraIndex) {
+    Dl_info info;
+    if (sRec == NULL || gRollbackResim) {
+        return;
+    }
+    if (dladdr(caller, &info) && info.dli_fbase) {
+        fprintf(sRec, "c %lu %lx cam %d\n", sTick, (unsigned long) ((uintptr_t) caller - (uintptr_t) info.dli_fbase),
+                cameraIndex);
+    }
+}
+
 static void RecordTickHash(unsigned long tick) {
     sTickHash[tick % RB_HASHES] = StateHash();
     sTickHashTick[tick % RB_HASHES] = (long) tick;
@@ -1680,6 +1700,24 @@ static void RecordTickHash(unsigned long tick) {
         fprintf(sRec, "g %lu %08x rng %04x", tick, (unsigned) (sTickHash[tick % RB_HASHES] >> 32), gRandomSeed16);
         for (int k = 0; k < NUM_PLAYERS; k++) {
             fprintf(sRec, " %08x", (unsigned) Fnv1a(1469598103934665603ull, &sHashCopy[k], sizeof(Player)));
+        }
+        {
+            Camera* cams[4] = { camera1, camera2, camera3, camera4 };
+            fprintf(sRec, " cam");
+            for (int c = 0; c < 4; c++) {
+                fprintf(sRec, " %08x", cams[c] ? (unsigned) Fnv1a(1469598103934665603ull, cams[c], sizeof(Camera)) : 0u);
+            }
+            fprintf(sRec, " c1pos %.3f %.3f %.3f rot %d %d %d", camera1->pos[0], camera1->pos[1], camera1->pos[2],
+                    camera1->rot[0], camera1->rot[1], camera1->rot[2]);
+            extern void Camera_DebugState(int* timers, int* modes);
+            extern s32 D_80164A28;
+            int timers[3], modes[3];
+            Camera_DebugState(timers, modes);
+            fprintf(sRec, " staging %d %d %d modes %d %d %d a28 %d types", timers[0], timers[1], timers[2], modes[0],
+                    modes[1], modes[2], (int) D_80164A28);
+            for (int k = 0; k < NUM_PLAYERS; k++) {
+                fprintf(sRec, " %04x", gPlayers[k].type);
+            }
         }
         fputc('\n', sRec);
         /* MK64_NET_REC_DUMP_FROM/_TO: the hashed (masked) karts of those
@@ -2150,15 +2188,16 @@ static void ProbeMaybeDump(void) {
     }
     int which = (long) sTick == at ? 0 : 1;
     char name[64];
-    const char* sects[] = { "__data", "__common", "__bss" };
+    const char* sects[] = { "__data", "__common", "__bss", "__data", "__bss" };
+    const char* segs[] = { "__DATA", "__DATA", "__DATA", "__MKSNAP", "__MKSNAP" };
     FILE* idx;
     char path[1024];
     snprintf(path, sizeof(path), "%s/%s-index%d.txt", dir, sIsHost ? "host" : "guest", which);
     idx = fopen(path, "w");
     uintptr_t poolStart = sPoolEnd - 0x10000000;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 5; i++) {
         unsigned long size = 0;
-        u8* base = getsectiondata(&__dso_handle, "__DATA", sects[i], &size);
+        u8* base = getsectiondata(&__dso_handle, segs[i], sects[i], &size);
         if (!base) {
             continue;
         }
@@ -2172,7 +2211,7 @@ static void ProbeMaybeDump(void) {
             ProbeWrite(dir, name, (void*) sPoolEnd, e - sPoolEnd);
             fprintf(idx, "%s %lx %lx\n", name, (unsigned long) sPoolEnd, (unsigned long) (e - sPoolEnd));
         } else {
-            snprintf(name, sizeof(name), "%s_%d.bin", sects[i], which);
+            snprintf(name, sizeof(name), "%s%s_%d.bin", i >= 3 ? "snap" : "", sects[i], which);
             ProbeWrite(dir, name, base, size);
             fprintf(idx, "%s %lx %lx\n", name, (unsigned long) b, (unsigned long) size);
         }

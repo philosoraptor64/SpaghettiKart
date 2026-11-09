@@ -2852,7 +2852,11 @@ void func_80095574(void) {
     // in the last moments before the attract timeout let this overwrite the
     // press-start fade's gMenuFadeType mid-fade, hijacking it into the demo
     // with the menu music already faded out. (Vanilla bug.)
-    if (gMenuTimingCounter >= 0x12D && is_screen_being_faded() == 0) {
+    // Online session: no attract demo. Its cinematic camera follows inputs of
+    // controllers that aren't part of the session and the counter runs in
+    // this drawing code, so the two games could disagree (and nobody wants
+    // a demo to start while friends sit on the title screen).
+    if (gMenuTimingCounter >= 0x12D && is_screen_being_faded() == 0 && !KartNet_InSession()) {
         func_8009E230();
         func_800CA0A0();
     }

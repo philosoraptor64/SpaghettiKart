@@ -1045,7 +1045,21 @@ void func_8001EA0C(Camera* camera, Player* player, s8 arg2) {
     camera->rot[2] = 0;
 }
 
+/* debug (KartNet trace): the start-of-race camera state */
+void Camera_DebugState(int* timers, int* modes) {
+    for (int i = 0; i < 3; i++) {
+        timers[i] = sStagingTimer[i];
+        modes[i] = cameras[i].mode;
+    }
+}
+
+/* debug (KartNet MK64_NET_REC_ALL): told about every camera update */
+void (*gCameraUpdateTrace)(void* caller, int cameraIndex) MK_SNAPSHOT_OUTSIDE = NULL;
+
 void func_8001EE98(Player* player, Camera* camera, s8 index) {
+    if (gCameraUpdateTrace != NULL) {
+        gCameraUpdateTrace(__builtin_return_address(0), index);
+    }
     s32 cameraIndex = camera->cameraId;
 
     switch (gModeSelection) {
