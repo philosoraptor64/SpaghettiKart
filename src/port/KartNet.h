@@ -77,6 +77,8 @@ void KartNet_UiSetVoice(int mode);         /* 0 off, 1 open mic, 2 push-to-talk 
  * slot draws as the local player's screen). */
 int KartNet_ScreenIndex(int slot);
 /* Online session (MK64_NET_SESSION): both games run as one console. */
+int KartNet_NetDone(void);
+void KartNet_Shutdown(void);
 int KartNet_InSession(void);
 /* Fewest players the main menu offers: everyone in an online session, else 1. */
 int KartNet_MinPlayers(void);

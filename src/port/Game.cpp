@@ -1136,6 +1136,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #endif
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include "port/SimHeap.h"
+#include "port/Rollback.h"
 #include <spdlog/spdlog.h>
 #include <algorithm>
 
@@ -1201,6 +1202,7 @@ extern "C"
             }
             objc_autoreleasePoolPop(pool);
 #endif
+            Rollback_ReleaseForReentry();
             SimHeap_ReleaseForReentry();
             Reentry_RestorePristine();
         }

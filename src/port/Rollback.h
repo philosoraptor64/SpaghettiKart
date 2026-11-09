@@ -15,6 +15,7 @@ void Rollback_SaveSlot(int slot);
 void Rollback_LoadSlot(int slot);
 /* Netplay: drawing-only state survives a rollback (keep before
  * n64net_rollback_frame, restore after one happened). */
+void Rollback_ReleaseForReentry(void);
 void Rollback_KeepDrawingState(void);
 void Rollback_RestoreDrawingState(void);
 void Rollback_SlotStats(double* avgSaveMs, double* avgLoadMs); /* before race setup, when the sim heap is on */

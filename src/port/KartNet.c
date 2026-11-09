@@ -309,7 +309,17 @@ static u32 Get32(const u8* p) {
 enum { PKT_HELLO = 1, PKT_CONFIG = 2, PKT_START = 3, PKT_PAUSE = 5, PKT_BYE = 6 }; /* inputs: n64net_input packets */
 static const u8 kMagic[4] = { 'M', 'K', 'N', '1' };
 
+/* i64 module: the host's game channel replaces the socket (no room server,
+ * no address: the host's session already connects the two players). Set by
+ * src/port/i64_module.cpp for an online run. */
+int (*gKartNetHostSend)(const void* data, uint32_t size) = NULL;
+int (*gKartNetHostRecv)(void* buf, uint32_t cap) = NULL;
+
 static void SendNow(const u8* buf, size_t len) {
+    if (gKartNetHostSend != NULL) {
+        gKartNetHostSend(buf, (uint32_t) len);
+        return;
+    }
     sendto(sSock, buf, len, 0, (const struct sockaddr*) &sPeer, sizeof(sPeer));
 }
 
@@ -564,11 +574,19 @@ static void Poll(void) {
     for (;;) {
         struct sockaddr_in from;
         socklen_t fromLen = sizeof(from);
-        ssize_t n = recvfrom(sSock, buf, sizeof(buf), 0, (struct sockaddr*) &from, &fromLen);
+        ssize_t n;
+        if (gKartNetHostRecv != NULL) {
+            memset(&from, 0, sizeof(from)); /* the host's channel only carries the peer's packets */
+            n = gKartNetHostRecv(buf, sizeof(buf));
+        } else {
+            n = recvfrom(sSock, buf, sizeof(buf), 0, (struct sockaddr*) &from, &fromLen);
+        }
         if (n <= 0) {
             break;
         }
-        if (!sIsHost) {
+        if (gKartNetHostRecv != NULL) {
+            /* no address filtering */
+        } else if (!sIsHost) {
             /* The guest only listens to its host. */
             if (from.sin_addr.s_addr != sPeer.sin_addr.s_addr || from.sin_port != sPeer.sin_port) {
                 continue;
@@ -761,6 +779,13 @@ static void Init(void) {
     }
 
 
+    if (gKartNetHostSend != NULL && gKartNetHostRecv != NULL) {
+        sHavePeer = 1;
+        sState = NET_HANDSHAKE;
+        Log("%s over the host's game channel; waiting for the %s", sIsHost ? "hosting" : "joining",
+            sIsHost ? "guest" : "host");
+        return;
+    }
     if (sUiSock >= 0) {
         /* Online screen: the room-code lookup already found the peer on this socket */
         sSock = sUiSock;
@@ -2217,6 +2242,17 @@ int KartNet_LocalPlayer(void) {
 int KartNet_WantsLocalView(void) {
     return sState != NET_OFF && sRaceRequested && sFullView && gActiveScreenMode == SCREEN_MODE_2P_SPLITSCREEN_VERTICAL &&
            (!sSession || gGamestate == RACING);
+}
+
+/* End of a module run (i64): close the logs and free the input ledger
+ * before the globals are reset (their pointers would be lost). */
+void KartNet_Shutdown(void) {
+    ResetNetState();
+}
+
+/* The netplay run ended (the peer left or went silent, or the handshake failed). */
+int KartNet_NetDone(void) {
+    return sState == NET_DONE;
 }
 
 int KartNet_InSession(void) {

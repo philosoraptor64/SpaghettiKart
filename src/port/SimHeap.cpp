@@ -222,6 +222,26 @@ inline void* NewAligned(size_t n, std::align_val_t al) {
 
 } // namespace
 
+/* ---- the same for a host app's global operator new/delete (i64 module:
+ * n64_alloc_hooks), so libc++'s out-of-line code allocates like the game ---- */
+extern "C" void* SimHeap_HookAlloc(size_t n) {
+    try {
+        return NewImpl(n);
+    } catch (...) {
+        return nullptr;
+    }
+}
+extern "C" void* SimHeap_HookAllocAligned(size_t n, size_t alignment) {
+    try {
+        return NewAligned(n, (std::align_val_t) alignment);
+    } catch (...) {
+        return nullptr;
+    }
+}
+extern "C" void SimHeap_HookFree(void* p) {
+    DeleteImpl(p);
+}
+
 /* ---- global operator new/delete ---- */
 void* operator new(size_t n) {
     return NewImpl(n);

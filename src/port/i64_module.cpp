@@ -9,8 +9,13 @@
  * (Reentry.cpp, SimHeap.cpp), so it can be started again in the same process.
  * Same layout as BattleShip's port/i64_module.cpp.
  *
- * Not yet: online runs over host->net_*, the session blob, ROM import on the
- * device, title art, pause. */
+ * Online runs use the host's game channel (host->net_send/net_recv, through
+ * KartNet's SendNow/Poll): no socket, room server or voice of our own. The
+ * run is a KartNet session (the whole game as one console, host = player 1)
+ * seeded with launch->seed; it ends (frame() returns EXIT) when the other
+ * player leaves or KartNet gives up on them.
+ *
+ * Not yet: the session blob, ROM import on the device, title art, pause. */
 #if defined(SPAGHETTIKART_I64_MODULE)
 
 #define N64_GAME_BUILDING_MODULE 1
@@ -18,6 +23,7 @@
 
 #include "Reentry.h"
 #include "SimHeap.h"
+#include "Rollback.h"
 #include "kartnet_build_id.h"
 
 #include <cstdio>
@@ -35,6 +41,15 @@ void LUS_SetExternalPacing(bool hostPaced);
 /* Game audio goes to the host (Engine.cpp AudioOutPlay). */
 extern void (*gPortHostAudioWrite)(const int16_t* stereo, uint32_t frames, uint32_t rate);
 extern uint32_t (*gPortHostAudioBuffered)(uint32_t rate);
+/* Online: the host's game channel (KartNet.c). */
+extern int (*gKartNetHostSend)(const void* data, uint32_t size);
+extern int (*gKartNetHostRecv)(void* buf, uint32_t cap);
+int KartNet_NetDone(void);
+void KartNet_Shutdown(void);
+/* SimHeap.cpp: the game's allocator, for the host's operator new */
+void* SimHeap_HookAlloc(size_t n);
+void* SimHeap_HookAllocAligned(size_t n, size_t alignment);
+void SimHeap_HookFree(void* p);
 }
 
 namespace {
@@ -61,6 +76,11 @@ KEEP const n64_host* sHost = nullptr;
 KEEP bool sRunning = false;
 KEEP void* sRenderer = nullptr; /* SDL renderer on the host's window, reused across runs */
 KEEP void* sRendererWindow = nullptr;
+KEEP bool sOnline = false;
+KEEP bool sPeerLeft = false;
+KEEP char sNetLog[1100] = {};
+
+const n64_alloc_hooks kAllocHooks = { SimHeap_HookAlloc, SimHeap_HookAllocAligned, SimHeap_HookFree };
 
 void SetEnv(const char* key, const std::string& value) {
     setenv(key, value.c_str(), 1);
@@ -101,8 +121,9 @@ extern "C" N64_GAME_EXPORT int n64_game_start(const n64_host* host, const n64_la
         std::snprintf(err, err_size, "i64 and this game module disagree on the interface version");
         return 1;
     }
-    if (launch->mode == N64_LAUNCH_ONLINE) {
-        std::snprintf(err, err_size, "Mario Kart online inside i64 isn't built yet");
+    if (launch->mode == N64_LAUNCH_ONLINE &&
+        (host->net_send == nullptr || host->net_recv == nullptr || launch->local_player > 1)) {
+        std::snprintf(err, err_size, "online needs i64's game channel and 2 players");
         return 1;
     }
     /* First start: everything the module has done so far is static
@@ -119,6 +140,32 @@ extern "C" N64_GAME_EXPORT int n64_game_start(const n64_host* host, const n64_la
                                             "MK64_NET_SESSION", "MK64_NET_VOICE", "MK64_NET_SEED" };
     for (const char* v : kNetVars) {
         unsetenv(v);
+    }
+    unsetenv("MK64_NET_LOG");
+    gKartNetHostSend = nullptr;
+    gKartNetHostRecv = nullptr;
+    sOnline = launch->mode == N64_LAUNCH_ONLINE;
+    sPeerLeft = false;
+    if (sOnline) {
+        const bool isHost = launch->local_player == 0;
+        SetEnv("MK64_NET", "1");
+        SetEnv("MK64_NET_HOST", isHost ? "1" : "0");
+        SetEnv("MK64_NET_SESSION", "1"); /* the whole game as one console */
+        if (launch->seed != 0) {
+            SetEnv("MK64_NET_SEED", std::to_string(launch->seed & 0xFFFF));
+        }
+        if (host->data_dir != nullptr && host->data_dir[0] != '\0') {
+            /* sync log + per-race input/hash records (desync forensics) */
+            std::snprintf(sNetLog, sizeof(sNetLog), "%s/kartnet-%s.log", host->data_dir, isHost ? "host" : "guest");
+            SetEnv("MK64_NET_LOG", sNetLog);
+        }
+        gKartNetHostSend = host->net_send;
+        gKartNetHostRecv = host->net_recv;
+        /* rollback keeps race objects in SimHeap: libc++'s own allocations
+         * must go the same way (n64_alloc_hooks) */
+        if (host->set_alloc_hooks != nullptr) {
+            host->set_alloc_hooks(&kAllocHooks);
+        }
     }
     if (sRendererWindow != host->window) {
         sRenderer = nullptr; /* a different window: LUS creates a new renderer */
@@ -138,6 +185,18 @@ extern "C" N64_GAME_EXPORT n64_frame_result n64_game_frame(void) {
     if (!sRunning) {
         return N64_GAME_FRAME_EXIT;
     }
+    if (sOnline) {
+        if (sHost->net_poll_event != nullptr) {
+            for (int e; (e = sHost->net_poll_event()) != 0;) {
+                if (e == N64_NET_PEER_LEFT) {
+                    sPeerLeft = true;
+                }
+            }
+        }
+        if (sPeerLeft || KartNet_NetDone()) {
+            return N64_GAME_FRAME_EXIT; /* the other player left: back to i64 */
+        }
+    }
     return Port_RunFrame() ? N64_GAME_FRAME_CONTINUE : N64_GAME_FRAME_EXIT;
 }
 
@@ -149,9 +208,17 @@ extern "C" N64_GAME_EXPORT void n64_game_stop(void) {
     if (!sRunning) {
         return;
     }
+    KartNet_Shutdown();
     Port_RunEnd(1);
+    Rollback_ReleaseForReentry();
     gPortHostAudioWrite = nullptr;
     gPortHostAudioBuffered = nullptr;
+    gKartNetHostSend = nullptr;
+    gKartNetHostRecv = nullptr;
+    if (sOnline && sHost->set_alloc_hooks != nullptr) {
+        sHost->set_alloc_hooks(nullptr);
+    }
+    sOnline = false;
     LUS_SetExternalWindow(nullptr, nullptr);
     LUS_SetExternalPacing(false);
     SimHeap_ReleaseForReentry();

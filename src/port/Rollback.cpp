@@ -602,3 +602,16 @@ void Rollback_SyncTestEndFrame(void) {
 }
 
 } // extern "C"
+
+/* Re-entry (i64 module / soak): free the snapshot slots, the SyncTest ring and
+ * the kept drawing state before the globals are reset (their containers would
+ * be forgotten with their memory still allocated). */
+extern "C" void Rollback_ReleaseForReentry(void) {
+    std::vector<Snapshot>().swap(sSlots);
+    std::vector<Frame>().swap(sRing);
+    sDrawKeep = DrawKeep();
+    if (sLog) {
+        fclose(sLog);
+        sLog = nullptr;
+    }
+}
