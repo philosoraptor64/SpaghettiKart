@@ -23,6 +23,8 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<!-- Without this, iOS silently drops LAN traffic (netplay). -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>SpaghettiKart uses the microphone for voice chat with the other player in online races.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>SpaghettiKart connects to other players on your local network for online races.</string>
 	<!-- Expose Documents (mk64.o2r, saves, logs) in the Files app. -->

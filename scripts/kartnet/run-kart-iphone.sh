@@ -7,13 +7,14 @@
 #   FRAMES=n      quit after n netplay frames (default 0 = until you close the Mac window)
 #   MAC_BOT=seed  scripted driver on the Mac (default: Mac controller/keyboard)
 #   ROLLBACK=1    rollback netcode (n64net) instead of lockstep; WINDOW=n (8)
+#   VOICE=1|ptt   voice chat on both sides; MAC_TONE=1 / PHONE_TONE=1 = that side sends a tone, not its mic
 #   PHONE_BOT=seed scripted driver on the phone (default: phone's controller)
 #   DELAY=n       input delay in frames (default 2)
 #   MODE, CUP, COURSE, CC, SEED, MAC_CHAR, PHONE_CHAR
 #   DEVICE=udid   phone (default: the first connected iPhone)
 set -u
-SK="$(cd "$(dirname "$0")/../.." && pwd)"; ROOT="${KARTNET_LOGS_ROOT:-$SK/..}"
-APP="$SK/build-cmake/SpaghettiKart.app/Contents/MacOS/SpaghettiKart"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+APP="$ROOT/SpaghettiKart/build-cmake/SpaghettiKart.app/Contents/MacOS/SpaghettiKart"
 BID=io.github.philosoraptor.spaghettikart
 STAMP=$(date +%Y%m%d-%H%M%S)
 LOGS="$ROOT/scripts/logs/kart-iphone-$STAMP"
@@ -39,6 +40,8 @@ cfg="$LOGS/netplay.cfg"
     [ -n "${PHONE_CHAR:-}" ] && echo "MK64_NET_CHAR=$PHONE_CHAR"
     [ -n "${ROLLBACK:-}" ] && echo "MK64_NET_ROLLBACK=$ROLLBACK"
     [ -n "${WINDOW:-}" ] && echo "MK64_NET_ROLLBACK_WINDOW=$WINDOW"
+    [ -n "${VOICE:-}" ] && echo "MK64_NET_VOICE=$VOICE"
+    [ -n "${PHONE_TONE:-}" ] && echo "MK64_NET_VOICE_TEST=1"
 } > "$cfg"
 copy_to_phone() {
     xcrun devicectl device copy to --device "$DEVICE" --domain-type appDataContainer \
@@ -52,6 +55,8 @@ host_env=(MK64_NET=1 MK64_NET_HOST=1 MK64_NET_BIND=0.0.0.0:7101 MK64_NET_DELAY="
 [ -n "${MAC_BOT:-}" ] && host_env+=(MK64_NET_BOT="$MAC_BOT")
 [ -n "${ROLLBACK:-}" ] && host_env+=(MK64_NET_ROLLBACK="$ROLLBACK")
 [ -n "${WINDOW:-}" ] && host_env+=(MK64_NET_ROLLBACK_WINDOW="$WINDOW")
+[ -n "${VOICE:-}" ] && host_env+=(MK64_NET_VOICE="$VOICE")
+[ -n "${MAC_TONE:-}" ] && host_env+=(MK64_NET_VOICE_TEST=1)
 [ -n "${MAC_CHAR:-}" ] && host_env+=(MK64_NET_CHAR="$MAC_CHAR")
 [ -n "${CUP:-}" ] && host_env+=(MK64_NET_CUP="$CUP")
 [ -n "${COURSE:-}" ] && host_env+=(MK64_NET_COURSE="$COURSE")

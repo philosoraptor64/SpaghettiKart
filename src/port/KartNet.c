@@ -37,6 +37,10 @@
 #include "n64net_rendezvous.h"
 #include "kartnet_build_id.h"
 #include <SDL2/SDL.h>
+#ifdef KARTNET_VOICE
+#include "n64net_voice.h"
+#endif
+void GameEngine_AudioKeepAlive(void); /* Engine.cpp */
 #if defined(__APPLE__)
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
@@ -637,6 +641,38 @@ static void HandlePacket(const u8* buf, size_t len, const struct sockaddr_in* fr
     }
 }
 
+/* Voice chat (MK64_NET_VOICE=1 open mic, =ptt push-to-talk; MK64_NET_VOICE_TEST=1
+ * a tone instead of the microphone). Voice packets share the race socket. */
+static int sVoiceMode = 0, sVoiceTest = 0, sVoiceStarted = 0;
+static void NetLogCb(const char* fmt, ...);
+#ifdef KARTNET_VOICE
+static void VoiceSend(const uint8_t* data, uint32_t size) {
+    SendRaw(data, size);
+}
+#endif
+static void VoiceUpdate(void) {
+#ifdef KARTNET_VOICE
+    if (sVoiceMode && !sVoiceStarted && sState == NET_RUNNING) {
+        n64net_voice_config vc;
+        memset(&vc, 0, sizeof(vc));
+        vc.enabled = 1;
+        vc.push_to_talk = sVoiceMode == 2;
+        vc.test_tone = sVoiceTest;
+        vc.log = NetLogCb;
+        n64net_voice_start(&vc);
+        sVoiceStarted = 1;
+    }
+    if (sVoiceStarted && sState == NET_DONE) {
+        n64net_voice_stop();
+        sVoiceStarted = 0;
+    }
+    if (sVoiceStarted) {
+        n64net_voice_pump(VoiceSend);
+        GameEngine_AudioKeepAlive();
+    }
+#endif
+}
+
 static void Poll(void) {
     u8 buf[1500];
     FlushSim();
@@ -659,8 +695,14 @@ static void Poll(void) {
         if (sNet && n64net_input_handle_packet(sNet, buf, (uint32_t) n)) {
             continue;
         }
+#ifdef KARTNET_VOICE
+        if (sVoiceStarted && n64net_voice_handle_packet(buf, (int32_t) n)) {
+            continue;
+        }
+#endif
         HandlePacket(buf, (size_t) n, &from);
     }
+    VoiceUpdate();
 }
 
 /* ------------------------------------------------------------------------ */
@@ -716,6 +758,11 @@ static void Init(void) {
     sRbFrom = EnvInt("MK64_NET_ROLLBACK_FROM", 60);
     if (sRollback && !SimHeap_Enable()) {
         sRollback = 0;
+    }
+    {
+        const char* v = getenv("MK64_NET_VOICE");
+        sVoiceMode = !v ? 0 : strcmp(v, "ptt") == 0 ? 2 : atoi(v) != 0;
+        sVoiceTest = EnvInt("MK64_NET_VOICE_TEST", 0) != 0;
     }
     sLegacy = !sRollback && EnvInt("MK64_NET_LEGACY", 0) != 0;
     sAdaptive = EnvInt("MK64_NET_ADAPTIVE", 1) != 0;
@@ -842,6 +889,7 @@ void KartNet_BeginFrame(void) {
         Init();
     }
     if (sState == NET_OFF || sState == NET_DONE) {
+        VoiceUpdate(); /* closes the microphone after a disconnect */
         return;
     }
     Poll();

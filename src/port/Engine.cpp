@@ -37,6 +37,11 @@
 #include <fast/interpreter.h>
 // #include <Fast3D/gfx_rendering_api.h>
 #include <SDL2/SDL.h>
+#include <atomic>
+#include <chrono>
+#ifdef KARTNET_VOICE
+#include "n64net_voice.h"
+#endif
 
 #include <utility>
 
@@ -479,6 +484,14 @@ void GameEngine::ProcessGfxCommands(Gfx* pool) {
 }
 
 // Audio
+/* When the game last handed audio to the output (for the voice keep-alive). */
+static std::atomic<int64_t> sLastAudioPlayUs{ 0 };
+static int64_t AudioNowUs() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
 void GameEngine::HandleAudioThread() {
     while (audio.running) {
         {
@@ -512,7 +525,12 @@ void GameEngine::HandleAudioThread() {
             mix_buffer[i] = nas_buffer[i] + ((int16_t)(hmas_buffer[i] * 32767.0f) * master_vol);
         }
 
+#ifdef KARTNET_VOICE
+        /* Netplay voice chat: the other player's voice, paced by this output. */
+        n64net_voice_mix(mix_buffer, (int) (2 * num_audio_samples), (int) GameEngine_GetSampleRate());
+#endif
         AudioPlayerPlayFrame((u8*) mix_buffer, 2 * num_audio_samples * 4);
+        sLastAudioPlayUs = AudioNowUs();
 
         audio.processing = false;
         audio.cv_from_thread.notify_one();
@@ -648,6 +666,30 @@ extern "C" uint32_t GameEngine_GetSampleRate() {
     }
 
     return player->GetSampleRate();
+}
+
+/* Netplay stalls (waiting for the other player) stop the game's audio, and
+ * with it the voice chat. Called from the netplay wait loops on the game
+ * thread: while the audio thread is idle and no game audio was played for
+ * 30 ms, play a block of silence carrying the voice. */
+extern "C" void GameEngine_AudioKeepAlive(void) {
+#ifdef KARTNET_VOICE
+    if (!n64net_voice_is_running() || AudioNowUs() - sLastAudioPlayUs < 30000) {
+        return;
+    }
+    std::unique_lock<std::mutex> lock(audio.mutex, std::try_to_lock);
+    if (!lock.owns_lock() || audio.processing || !audio.running) {
+        return;
+    }
+    const uint32_t rate = GameEngine_GetSampleRate();
+    if (rate == 0 || AudioPlayerBuffered() >= AudioPlayerGetDesiredBuffered()) {
+        return;
+    }
+    s16 block[SAMPLES_PER_FRAME] = { 0 };
+    n64net_voice_mix(block, 2 * SAMPLES_LOW, (int) rate);
+    AudioPlayerPlayFrame((u8*) block, 2 * SAMPLES_LOW * 4);
+    sLastAudioPlayUs = AudioNowUs();
+#endif
 }
 
 extern "C" uint32_t GameEngine_GetSamplesPerFrame() {
