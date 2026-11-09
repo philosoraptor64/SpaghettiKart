@@ -139,21 +139,6 @@ target_include_directories(
                           ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(${PROJECT_NAME} PRIVATE YAML_CPP_STATIC_DEFINE)
 
-# n64net (github.com/philosoraptor64/n64net): netplay input exchange with
-# prediction/rollback, time sync and sync checks (used by KartNet's rollback
-# mode). Voice chat not wired up yet.
-set(N64NET_VOICE ON CACHE BOOL "" FORCE)
-add_subdirectory(n64net)
-target_link_libraries(${PROJECT_NAME} PRIVATE n64net)
-target_compile_definitions(${PROJECT_NAME} PRIVATE KARTNET_VOICE=1)
-# Netplay build id: the room server pairs only equal simulation code.
-n64net_add_build_id(${PROJECT_NAME}
-  HEADER ${CMAKE_BINARY_DIR}/generated/kartnet_build_id.h
-  MACRO KARTNET_BUILD_ID
-  ENTRIES "${CMAKE_SOURCE_DIR}::src"
-          "${CMAKE_SOURCE_DIR}/n64net::client/src/n64net_input.cpp"
-          "${CMAKE_SOURCE_DIR}/n64net::client/include/n64net_input.h")
-
 # Rollback snapshots: put the game's mutable C globals in the __MKSNAP segment
 # (src/port/SnapshotSection.h). -fno-common turns tentative definitions into
 # real ones so the section pragma applies to them. Netplay transport, the
@@ -197,6 +182,23 @@ endif()
 include(cmake/dependencies/common.cmake)
 
 include(cmake/dependencies/FindLib.cmake)
+
+# n64net (github.com/philosoraptor64/n64net): netplay input exchange with
+# prediction/rollback, time sync and sync checks (used by KartNet's rollback
+# and lockstep modes) and voice chat. After the dependencies, so it finds
+# libultraship's SDL2 target (iOS has no installed SDL2).
+set(N64NET_VOICE ON CACHE BOOL "" FORCE)
+add_subdirectory(n64net)
+target_link_libraries(${PROJECT_NAME} PRIVATE n64net)
+target_compile_definitions(${PROJECT_NAME} PRIVATE KARTNET_VOICE=1)
+# Netplay build id: the room server pairs only equal simulation code.
+n64net_add_build_id(${PROJECT_NAME}
+  HEADER ${CMAKE_BINARY_DIR}/generated/kartnet_build_id.h
+  MACRO KARTNET_BUILD_ID
+  ENTRIES "${CMAKE_SOURCE_DIR}::src"
+          "${CMAKE_SOURCE_DIR}/n64net::client/src/n64net_input.cpp"
+          "${CMAKE_SOURCE_DIR}/n64net::client/include/n64net_input.h")
+
 
 # fmt's consteval format-string checking fails to compile under newer
 # AppleClang (Xcode 16+) with the spdlog/fmt versions in use (both vcpkg's on
