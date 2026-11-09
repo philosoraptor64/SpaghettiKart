@@ -7,9 +7,9 @@
  * gets no input. Open it with the "Online" button in the corner of the menus,
  * the controller's View/Back button, or F2.
  *
- * The room code is picked with letter tiles (+ above and - below each letter;
- * with a controller: D-pad onto them, A to step), so no keyboard is needed; the server and password (Settings)
- * are text fields, filled once (or later by an invite link).
+ * The room code, server and password are text fields (on iPhone, tapping one
+ * brings up the keyboard); the server and password are filled once, in
+ * Settings.
  *
  * Settings live in cvars: gNet.Server ("host:port"), gNet.Password,
  * gNet.Voice (0 off, 1 open mic, 2 push-to-talk), gNet.LastRoom.
@@ -31,24 +31,17 @@ extern "C" {
 
 namespace {
 
-const char kCodeChars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-const int kNumCodeChars = (int) sizeof(kCodeChars) - 1;
 
 bool sOpen = false;
 bool sWasOpen = false;
 bool sFocusNext = false;
 bool sShowSettings = false;
-int sCode[4] = { 0, 0, 0, 0 };
+char sCode[8] = "";
 char sServer[128] = "";
 char sPassword[128] = "";
 int sVoice = 1;
 bool sLoaded = false;
 ImGuiConfigFlags sSavedFlags = 0;
-
-int CodeIndex(char c) {
-    const char* p = strchr(kCodeChars, c);
-    return (p && c) ? (int) (p - kCodeChars) : 0;
-}
 
 void LoadSettings() {
     if (sLoaded) {
@@ -58,10 +51,7 @@ void LoadSettings() {
     snprintf(sServer, sizeof(sServer), "%s", CVarGetString("gNet.Server", ""));
     snprintf(sPassword, sizeof(sPassword), "%s", CVarGetString("gNet.Password", ""));
     sVoice = CVarGetInteger("gNet.Voice", 1);
-    const char* last = CVarGetString("gNet.LastRoom", "");
-    for (int i = 0; i < 4; i++) {
-        sCode[i] = (last && (int) strlen(last) > i) ? CodeIndex(last[i]) : 0;
-    }
+    snprintf(sCode, sizeof(sCode), "%s", CVarGetString("gNet.LastRoom", ""));
 }
 
 void SaveSettings() {
@@ -71,12 +61,14 @@ void SaveSettings() {
     CVarSave();
 }
 
-std::string CodeString() {
-    std::string s;
-    for (int i = 0; i < 4; i++) {
-        s += kCodeChars[sCode[i]];
+/* room codes: letters and digits, shown in capitals */
+int CodeFilter(ImGuiInputTextCallbackData* data) {
+    ImWchar c = data->EventChar;
+    if (c >= 'a' && c <= 'z') {
+        data->EventChar = (ImWchar) (c - 'a' + 'A');
+        return 0;
     }
-    return s;
+    return ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) ? 0 : 1;
 }
 
 /* A full-width button. */
@@ -96,8 +88,9 @@ void SetOpen(bool open) {
 }
 
 void DrawOpener(float scale) {
-    /* only in the menus (not in races) and not while the screen is open */
-    if (sOpen || gGamestate == RACING) {
+    /* everywhere but a race someone is playing (the attract demo's races count
+     * as the intro), and not while the screen is open */
+    if (sOpen || (gGamestate == RACING && !gDemoMode)) {
         return;
     }
     ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -117,33 +110,12 @@ void DrawOpener(float scale) {
     ImGui::End();
 }
 
-void DrawCodePicker(float scale) {
-    const float tile = 54.0f * scale;
-    const float avail = ImGui::GetContentRegionAvail().x;
-    const float gap = 12.0f * scale;
-    const float startX = ImGui::GetCursorPosX() + (avail - (4 * tile + 3 * gap)) / 2.0f;
-    const float y0 = ImGui::GetCursorPosY();
-    for (int i = 0; i < 4; i++) {
-        ImGui::PushID(i);
-        const float x = startX + (float) i * (tile + gap);
-        ImGui::SetCursorPos(ImVec2(x, y0));
-        if (ImGui::Button("+", ImVec2(tile, tile * 0.7f))) {
-            sCode[i] = (sCode[i] + 1) % kNumCodeChars;
-        }
-        ImGui::SetCursorPos(ImVec2(x, y0 + tile * 0.75f));
-        char letter[2] = { kCodeChars[sCode[i]], 0 };
-        /* the letter itself: tapping it (or A on it) also steps it forward */
-        if (ImGui::Button(letter, ImVec2(tile, tile))) {
-            sCode[i] = (sCode[i] + 1) % kNumCodeChars;
-        }
-        ImGui::SetCursorPos(ImVec2(x, y0 + tile * 1.8f));
-        if (ImGui::Button("-", ImVec2(tile, tile * 0.7f))) {
-            sCode[i] = (sCode[i] + kNumCodeChars - 1) % kNumCodeChars;
-        }
-        ImGui::PopID();
-    }
-    ImGui::SetCursorPos(ImVec2(ImGui::GetCursorPosX(), y0 + tile * 2.6f));
-    ImGui::Dummy(ImVec2(1, 1));
+void DrawCodeField(float scale) {
+    ImGui::SetWindowFontScale(scale * 1.6f);
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##code", "CODE", sCode, 7,
+                             ImGuiInputTextFlags_CharsUppercase | ImGuiInputTextFlags_CallbackCharFilter, CodeFilter);
+    ImGui::SetWindowFontScale(scale);
 }
 
 void DrawSettings(float scale) {
@@ -205,13 +177,12 @@ void DrawScreen(float scale) {
                 ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::TextUnformatted("Join a friend's room:");
-                DrawCodePicker(scale);
+                DrawCodeField(scale);
                 if (WideButton("Join", buttonH)) {
-                    std::string code = CodeString();
-                    CVarSetString("gNet.LastRoom", code.c_str());
+                    CVarSetString("gNet.LastRoom", sCode);
                     SaveSettings();
                     KartNet_UiSetVoice(sVoice);
-                    KartNet_UiStart(0, sServer, code.c_str(), sPassword);
+                    KartNet_UiStart(0, sServer, sCode, sPassword);
                 }
                 ImGui::Spacing();
                 ImGui::Separator();
