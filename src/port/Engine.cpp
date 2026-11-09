@@ -492,6 +492,31 @@ static int64_t AudioNowUs() {
         .count();
 }
 
+/* Audio output. While n64net voice runs with the mic on iOS, the game's audio
+ * goes through n64net's voice-processing unit (echo cancellation needs to hear
+ * everything the speaker plays) instead of the normal audio device. */
+static int32_t AudioOutBuffered() {
+#ifdef KARTNET_VOICE
+    if (n64net_voice_output_active()) {
+        return n64net_voice_output_buffered((int) GameEngine_GetSampleRate());
+    }
+#endif
+    return AudioPlayerBuffered();
+}
+static void AudioOutPlay(s16* stereo, u32 frames) {
+#ifdef KARTNET_VOICE
+    const int rate = (int) GameEngine_GetSampleRate();
+    n64net_voice_mix(stereo, (int) frames, rate); /* the other player's voice */
+    if (n64net_voice_output_active()) {
+        n64net_voice_output_write(stereo, (int) frames, rate);
+        sLastAudioPlayUs = AudioNowUs();
+        return;
+    }
+#endif
+    AudioPlayerPlayFrame((u8*) stereo, frames * 4);
+    sLastAudioPlayUs = AudioNowUs();
+}
+
 void GameEngine::HandleAudioThread() {
     while (audio.running) {
         {
@@ -506,7 +531,7 @@ void GameEngine::HandleAudioThread() {
         }
         std::unique_lock<std::mutex> Lock(audio.mutex);
 
-        int samples_left = AudioPlayerBuffered();
+        int samples_left = AudioOutBuffered();
         u32 num_audio_samples = samples_left < AudioPlayerGetDesiredBuffered() ? SAMPLES_HIGH : SAMPLES_LOW;
 
         s16 nas_buffer[SAMPLES_PER_FRAME] = { 0 };
@@ -525,12 +550,7 @@ void GameEngine::HandleAudioThread() {
             mix_buffer[i] = nas_buffer[i] + ((int16_t)(hmas_buffer[i] * 32767.0f) * master_vol);
         }
 
-#ifdef KARTNET_VOICE
-        /* Netplay voice chat: the other player's voice, paced by this output. */
-        n64net_voice_mix(mix_buffer, (int) (2 * num_audio_samples), (int) GameEngine_GetSampleRate());
-#endif
-        AudioPlayerPlayFrame((u8*) mix_buffer, 2 * num_audio_samples * 4);
-        sLastAudioPlayUs = AudioNowUs();
+        AudioOutPlay(mix_buffer, 2 * num_audio_samples);
 
         audio.processing = false;
         audio.cv_from_thread.notify_one();
@@ -682,13 +702,11 @@ extern "C" void GameEngine_AudioKeepAlive(void) {
         return;
     }
     const uint32_t rate = GameEngine_GetSampleRate();
-    if (rate == 0 || AudioPlayerBuffered() >= AudioPlayerGetDesiredBuffered()) {
+    if (rate == 0 || AudioOutBuffered() >= AudioPlayerGetDesiredBuffered()) {
         return;
     }
     s16 block[SAMPLES_PER_FRAME] = { 0 };
-    n64net_voice_mix(block, 2 * SAMPLES_LOW, (int) rate);
-    AudioPlayerPlayFrame((u8*) block, 2 * SAMPLES_LOW * 4);
-    sLastAudioPlayUs = AudioNowUs();
+    AudioOutPlay(block, 2 * SAMPLES_LOW);
 #endif
 }
 
