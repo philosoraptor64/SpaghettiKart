@@ -1181,6 +1181,12 @@ extern "C"
         fprintf(stderr, "MK64 soak: cycle %d/%d done, footprint %lu KB, threads %u (globals: %lu KB copied, %lu KB zero pages)\n",
                 cycle + 1, cycles, footprintKb, threads, copiedKb, zeroKb);
     }
+    if (cycles > 1 && getenv("MK64_SOAK_HOLD")) { // debug: keep the process for vmmap / leaks
+        fprintf(stderr, "MK64 soak: holding (pid %d)\n", (int) getpid());
+        for (;;) {
+            pause();
+        }
+    }
     // Everything user-visible (config, saves) is persisted by Destroy(). Skip the
     // remaining static destructors: their order is unspecified and some log after
     // spdlog's own statics are gone, crashing on quit (same class as issue #689).
