@@ -75,6 +75,11 @@ PID=$(xcrun devicectl device info processes --device "$DEVICE" 2>/dev/null | awk
 [ -n "$PID" ] && xcrun devicectl device process signal --device "$DEVICE" --pid "$PID" --signal SIGTERM > /dev/null 2>&1
 xcrun devicectl device copy from --device "$DEVICE" --domain-type appDataContainer --domain-identifier $BID \
     --source Documents/kartnet.log --destination "$LOGS/phone.log" > /dev/null 2>&1
+# race record (inputs + checkpoint hashes, for playback-kart.sh) and, after a desync, the karts at that checkpoint
+for f in kartnet.log.rec kartnet.log.desync.bin; do
+    xcrun devicectl device copy from --device "$DEVICE" --domain-type appDataContainer --domain-identifier $BID \
+        --source "Documents/$f" --destination "$LOGS/phone${f#kartnet.log}" > /dev/null 2>&1 || true
+done
 [ -n "${DUMP:-}" ] && xcrun devicectl device copy from --device "$DEVICE" --domain-type appDataContainer --domain-identifier $BID \
     --source Documents/kartnet-dump.bin --destination "$LOGS/phone-dump.bin" > /dev/null 2>&1
 # Back to normal single-player launches.

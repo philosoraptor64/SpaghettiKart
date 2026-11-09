@@ -48,6 +48,9 @@ extern OSContPad gControllerPads[4];
 #include "objects.h"
 #include "render_player.h"
 void rollback_sim_frame(void); /* main.c */
+extern const size_t gPlayerVtxSize[8]; /* data/some_data.c */
+extern struct ObjectInterpData2 prevObject2[]; /* math_util_2.c */
+extern const size_t gPrevObject2Size;
 }
 
 namespace {
@@ -230,6 +233,18 @@ size_t Compare(const char* name, const std::vector<uint8_t>& a, const std::vecto
     return bad;
 }
 
+/* More drawing-only globals: the kart sprite quads (render_player.c writes
+ * their heights) and the "object jumped on screen, skip a frame" positions
+ * (math_util_2.c mtxf_set_matrix_gObjectList). */
+std::vector<std::pair<uint8_t*, size_t>> MoreDrawingState() {
+    std::vector<std::pair<uint8_t*, size_t>> r;
+    for (int i = 0; i < 8; i++) {
+        r.push_back({ (uint8_t*) gPlayerVtx[i], gPlayerVtxSize[i] });
+    }
+    r.push_back({ (uint8_t*) prevObject2, gPrevObject2Size });
+    return r;
+}
+
 /* Drawing-only state that the normal frames write and re-simulation does
  * not (no drawing): blank it in both copies before comparing. */
 void MaskDrawingState(Snapshot& s) {
@@ -277,6 +292,9 @@ void MaskDrawingState(Snapshot& s) {
         maskIn(*r, base, gEncodedKartTexture, sizeof(gEncodedKartTexture[0]) * 2, false);
         maskIn(*r, base, gPlayerPalettesList, sizeof(gPlayerPalettesList), false);
         maskIn(*r, base, gPlayersToRenderScreenId, sizeof(s16) * 8, false);
+        for (auto& d : MoreDrawingState()) {
+            maskIn(*r, base, d.first, d.second, false);
+        }
         /* Lakitu faces the camera: OLakitu::Draw sets its orientation. */
         for (int i = 0; i < 4; i++) {
             s32 idx = gIndexLakituList[i];
@@ -349,6 +367,9 @@ std::vector<std::pair<uint8_t*, size_t>> DrawingRegions() {
         { (uint8_t*) gPlayerPalettesList, sizeof(gPlayerPalettesList) },
         { (uint8_t*) gPlayersToRenderScreenId, sizeof(s16) * 8 },
     };
+    for (auto& d : MoreDrawingState()) {
+        r.push_back(d);
+    }
     for (int i = 0; i < 4; i++) {
         s32 idx = gIndexLakituList[i];
         if (idx > 0 && idx < OBJECT_LIST_SIZE) {

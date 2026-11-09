@@ -49,7 +49,8 @@ s16 gPlayersToRenderScreenId[8];
 MK_SNAPSHOT_OUTSIDE Player* gPlayersToRenderPlayer[8];
 s16 gMatrixEffectCount;
 s32 D_80164AF4[3];
-struct_D_802F1F80* gPlayerPalette;
+/* set by the drawing code right before each use: not simulation state */
+MK_SNAPSHOT_OUTSIDE struct_D_802F1F80* gPlayerPalette;
 MK_SNAPSHOT_OUTSIDE static const char* sKartTexture;
 u16 gPlayerRedEffect[8];
 u16 gPlayerGreenEffect[8];

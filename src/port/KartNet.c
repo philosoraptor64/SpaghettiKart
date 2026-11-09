@@ -119,6 +119,29 @@ static long sTickHashTick[RB_HASHES];
 static long sLastRecorded = -1;
 static unsigned long sRbCount = 0, sRbFrames = 0, sRbMaxDepth = 0, sHolds = 0;
 static int sDesyncLogged = 0;
+
+/* Desync forensics. Every race writes "<log>.rec": the race config, every
+ * confirmed tick's inputs for both players ("i tick b0 x0 y0 b1 x1 y1") and
+ * every checkpoint hash ("h tick hash"). MK64_NET_PLAYBACK=<file.rec> re-runs
+ * that race offline from those inputs and compares its own checkpoint hashes:
+ * the side whose hashes the playback matches simulated correctly (add
+ * MK64_SYNCTEST=8 to find state a rollback restores wrongly). On a desync
+ * both sides also write the checkpoint's kart state ("<log>.desync.bin", the
+ * hashed copy of gPlayers) and log a per-kart hash line to compare. */
+#define DETAIL_RING 8
+static FILE* sRec = NULL;
+static char sRecBase[1024];
+static Player sDetail[DETAIL_RING][NUM_PLAYERS];
+static long sDetailTick[DETAIL_RING];
+static u16 sDetailSeed[DETAIL_RING];
+static s32 sDetailState[DETAIL_RING];
+static int sPlayback = 0;
+static unsigned long sPlayLen = 0;
+static u16* sPlayButtons = NULL;
+static s8* sPlayStick = NULL;
+static u32* sPlayHash = NULL; /* per checkpoint, 0 = none */
+static unsigned long sPlayMatched = 0, sPlayChecked = 0;
+static long sPlayFirstBad = -1;
 int gKartNetHoldFrame = 0; /* time sync: this displayed frame runs no game logic */
 
 /* Simulated bad network for tests (outgoing packets of this side):
@@ -531,18 +554,92 @@ static void PumpWhileWaiting(void) {
     ShowWaiting();
 }
 
+/* MK64_NET_PLAYBACK: load a race record (see sRec) and run it offline. */
+static void LoadPlayback(const char* path) {
+    FILE* in = fopen(path, "r");
+    if (!in) {
+        Log("playback: cannot open %s", path);
+        return;
+    }
+    unsigned long cap = 16384;
+    sPlayButtons = (u16*) calloc(cap * 2, sizeof(u16));
+    sPlayStick = (s8*) calloc(cap * 4, 1);
+    sPlayHash = (u32*) calloc(cap / HASH_EVERY + 1, sizeof(u32));
+    char line[256];
+    int haveRace = 0;
+    while (fgets(line, sizeof(line), in)) {
+        unsigned long t;
+        unsigned int b0, b1, h, seed;
+        int x0, y0, x1, y1, mode, cup, course, cc, c0, c1, delay;
+        if (sscanf(line, "# race: seed=0x%x mode=%d cup=%d course=%d cc=%d chars=%d,%d delay=%d", &seed, &mode, &cup,
+                   &course, &cc, &c0, &c1, &delay) == 8) {
+            sSeed = seed;
+            sMode = mode;
+            sCup = cup;
+            sCourse = course;
+            sCC = cc;
+            sChars[0] = c0;
+            sChars[1] = c1;
+            sDelay = delay;
+            haveRace = 1;
+        } else if (sscanf(line, "i %lu %x %d %d %x %d %d", &t, &b0, &x0, &y0, &b1, &x1, &y1) == 7) {
+            while (t >= cap) {
+                sPlayButtons = (u16*) realloc(sPlayButtons, cap * 4 * sizeof(u16));
+                memset(sPlayButtons + cap * 2, 0, cap * 2 * sizeof(u16));
+                sPlayStick = (s8*) realloc(sPlayStick, cap * 8);
+                memset(sPlayStick + cap * 4, 0, cap * 4);
+                sPlayHash = (u32*) realloc(sPlayHash, (cap * 2 / HASH_EVERY + 1) * sizeof(u32));
+                memset(sPlayHash + cap / HASH_EVERY + 1, 0, (cap / HASH_EVERY) * sizeof(u32));
+                cap *= 2;
+            }
+            sPlayButtons[t * 2] = (u16) b0;
+            sPlayButtons[t * 2 + 1] = (u16) b1;
+            sPlayStick[t * 4] = (s8) x0;
+            sPlayStick[t * 4 + 1] = (s8) y0;
+            sPlayStick[t * 4 + 2] = (s8) x1;
+            sPlayStick[t * 4 + 3] = (s8) y1;
+            if (t + 1 > sPlayLen) {
+                sPlayLen = t + 1;
+            }
+        } else if (sscanf(line, "h %lu %x", &t, &h) == 2 && t % HASH_EVERY == 0 && t < cap) {
+            sPlayHash[t / HASH_EVERY] = h;
+        }
+    }
+    fclose(in);
+    if (!haveRace || sPlayLen == 0) {
+        Log("playback: %s has no race or no inputs", path);
+        return;
+    }
+    sPlayback = 1;
+    sIsHost = 1;
+    sLocalPlayer = (int) EnvInt("MK64_NET_PLAYBACK_VIEW", 0) ? 1 : 0;
+    sRollback = 0;
+    sState = NET_RUNNING;
+    Log("playback of %s: %lu ticks, seed=0x%04x cup=%d course=%d chars=%d,%d", path, sPlayLen, sSeed, sCup, sCourse,
+        sChars[0], sChars[1]);
+}
+
 static void Init(void) {
     sInitDone = 1;
 #if defined(PLATFORM_IOS)
     LoadConfigFile();
 #endif
-    if (EnvInt("MK64_NET", 0) == 0) {
+    const char* playback = getenv("MK64_NET_PLAYBACK");
+    if (EnvInt("MK64_NET", 0) == 0 && !(playback && *playback)) {
         return;
     }
     char pathBuf[1024];
     const char* logPath = DocumentsPath(getenv("MK64_NET_LOG"), pathBuf, sizeof(pathBuf));
     if (logPath && *logPath) {
         sLog = fopen(logPath, "w");
+        snprintf(sRecBase, sizeof(sRecBase), "%s", logPath);
+        if (!(playback && *playback)) {
+            char recPath[1100];
+            snprintf(recPath, sizeof(recPath), "%s.rec", logPath);
+            sRec = fopen(recPath, "w");
+            snprintf(recPath, sizeof(recPath), "%s.desync.bin", logPath);
+            remove(recPath); /* from an earlier race */
+        }
     }
 
     sIsHost = EnvInt("MK64_NET_HOST", 0) != 0;
@@ -595,6 +692,10 @@ static void Init(void) {
     sBotDrift = (int) EnvInt("MK64_NET_BOT_DRIFT", 0);
     LoadReplay(getenv("MK64_NET_REPLAY"));
     sBotState = (unsigned int) sBot * 2654435761u + 1;
+    if (playback && *playback) {
+        LoadPlayback(playback);
+        return;
+    }
 
 
     sSock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -759,6 +860,11 @@ void KartNet_BeginFrame(void) {
             fprintf(sLog, "# race: seed=0x%04x mode=%d cup=%d course=%d cc=%d chars=%d,%d delay=%d\n", sSeed, sMode,
                     sCup, sCourse, sCC, sChars[0], sChars[1], sDelay);
         }
+        if (sRec) {
+            fprintf(sRec, "# race: seed=0x%04x mode=%d cup=%d course=%d cc=%d chars=%d,%d delay=%d\n", sSeed, sMode,
+                    sCup, sCourse, sCC, sChars[0], sChars[1], sDelay);
+            fprintf(sRec, "# %s, build %s\n", sIsHost ? "host (player 1)" : "guest (player 2)", KARTNET_BUILD_ID);
+        }
         Log("race requested (boot frame %lu)", sBootFrames);
     }
     if (sRaceRequested && gGamestate == RACING && gGamestateNext == RACING) {
@@ -862,9 +968,44 @@ static void ApplyNetPads(unsigned long tick) {
     }
 }
 
+static Player sHashCopy[NUM_PLAYERS];
 static void RecordTickHash(unsigned long tick) {
     sTickHash[tick % RB_HASHES] = StateHash();
     sTickHashTick[tick % RB_HASHES] = (long) tick;
+    if (tick % HASH_EVERY == 0) {
+        /* StateHash left the masked kart copy in sHashCopy */
+        const int d = (int) ((tick / HASH_EVERY) % DETAIL_RING);
+        memcpy(sDetail[d], sHashCopy, sizeof(sHashCopy));
+        sDetailTick[d] = (long) tick;
+        sDetailSeed[d] = gRandomSeed16;
+        sDetailState[d] = gGamestate;
+    }
+}
+
+/* A desync at checkpoint `tick`: log a hash per kart and write the karts. */
+static void WriteDesyncDetail(unsigned long tick) {
+    const int d = (int) ((tick / HASH_EVERY) % DETAIL_RING);
+    if (sDetailTick[d] != (long) tick) {
+        Log("desync detail: checkpoint %lu no longer kept", tick);
+        return;
+    }
+    char line[400];
+    int n = snprintf(line, sizeof(line), "desync detail tick %lu: rng %04x state %d karts", tick, sDetailSeed[d],
+                     (int) sDetailState[d]);
+    for (int i = 0; i < NUM_PLAYERS && n < (int) sizeof(line); i++) {
+        unsigned long long h = Fnv1a(1469598103934665603ull, &sDetail[d][i], sizeof(Player));
+        n += snprintf(line + n, sizeof(line) - n, " %08x", (unsigned) (h ^ (h >> 32)));
+    }
+    Log("%s", line);
+    if (sRecBase[0]) {
+        char path[1100];
+        snprintf(path, sizeof(path), "%s.desync.bin", sRecBase);
+        FILE* f = fopen(path, "wb");
+        if (f) {
+            fwrite(sDetail[d], sizeof(Player), NUM_PLAYERS, f);
+            fclose(f);
+        }
+    }
 }
 
 static void RbSave(void* user, uint32_t slot) {
@@ -898,9 +1039,22 @@ static void RecordConfirmedHashes(void) {
     }
     for (long t = sLastRecorded + 1; t <= (long) c && t <= (long) sTick; t++) {
         const int slot = (int) (t % RB_HASHES);
+        if (sRec) {
+            n64net_pad a, b;
+            n64net_input_get(sNet, 0, (uint32_t) t, &a);
+            n64net_input_get(sNet, 1, (uint32_t) t, &b);
+            fprintf(sRec, "i %ld %04x %d %d %04x %d %d\n", t, a.buttons, a.stick_x, a.stick_y, b.buttons, b.stick_x,
+                    b.stick_y);
+        }
         if (t % HASH_EVERY == 0 && sTickHashTick[slot] == t) {
             unsigned long long h = sTickHash[slot];
             n64net_sync_record(sNet, (uint32_t) t, 0, (uint32_t) (h ^ (h >> 32)));
+            if (sRec) {
+                fprintf(sRec, "h %ld %08x\n", t, (unsigned) (h ^ (h >> 32)));
+                if (t % (HASH_EVERY * 10) == 0) {
+                    fflush(sRec); /* the app may be killed: keep the file current */
+                }
+            }
         }
         sLastRecorded = t;
     }
@@ -909,6 +1063,11 @@ static void RecordConfirmedHashes(void) {
     if (!sDesyncLogged && n64net_sync_desynced(sNet, &dt, &kind)) {
         sDesyncLogged = 1;
         Log("DESYNC tick %u (%s)", dt, sRollback ? "rollback" : "lockstep");
+        WriteDesyncDetail(dt);
+        if (sRec) {
+            fprintf(sRec, "# desync at tick %u\n", dt);
+            fflush(sRec);
+        }
     }
 }
 
@@ -1028,6 +1187,16 @@ void KartNet_OverrideInput(void) {
     if (sState != NET_RUNNING || !sRaceRequested) {
         return;
     }
+    if (sPlayback) {
+        if (sTick < sPlayLen) {
+            for (int p = 0; p < 2; p++) {
+                gControllerPads[p].button = sPlayButtons[sTick * 2 + p];
+                gControllerPads[p].stick_x = sPlayStick[sTick * 4 + p * 2];
+                gControllerPads[p].stick_y = sPlayStick[sTick * 4 + p * 2 + 1];
+            }
+        }
+        return;
+    }
 
     NetPad local;
     if (sReplay) {
@@ -1056,7 +1225,6 @@ void KartNet_OverrideInput(void) {
  * device draws only its own screen, so those fields differ by design. Tested:
  * with one side drawing both screens and the other only its own, every other
  * field stayed identical over 3000 frames of drifting and items. */
-static Player sHashCopy[NUM_PLAYERS];
 static void MaskDrawingFields(Player* players);
 static unsigned long long HashPlayers(unsigned long long h) {
     memcpy(sHashCopy, gPlayers, sizeof(sHashCopy));
@@ -1192,6 +1360,30 @@ void KartNet_EndFrame(void) {
         gKartNetHoldFrame = 0; /* no game tick ran this frame */
         return;
     }
+    if (sPlayback) {
+        RecordTickHash(sTick);
+        if (sTick % HASH_EVERY == 0 && sPlayHash[sTick / HASH_EVERY] != 0) {
+            unsigned long long h = sTickHash[sTick % RB_HASHES];
+            const u32 mine = (u32) (h ^ (h >> 32)), rec = sPlayHash[sTick / HASH_EVERY];
+            sPlayChecked++;
+            if (mine == rec) {
+                sPlayMatched++;
+            } else if (sPlayFirstBad < 0) {
+                sPlayFirstBad = (long) sTick;
+                Log("playback differs from the recording at tick %lu (%08x here, %08x recorded)", sTick, mine, rec);
+                WriteDesyncDetail(sTick);
+            }
+        }
+        if (sTick + 1 >= sPlayLen) {
+            Log("playback done after %lu ticks: %lu of %lu checkpoints match the recording%s", sTick + 1, sPlayMatched,
+                sPlayChecked, sPlayFirstBad < 0 ? "" : " (see 'differs' above)");
+            if (sLog) {
+                fclose(sLog);
+                sLog = NULL;
+            }
+            _exit(sPlayFirstBad < 0 ? 0 : 3);
+        }
+    }
     if (sNet) {
         RecordTickHash(sTick);
         RecordConfirmedHashes();
@@ -1236,6 +1428,10 @@ void KartNet_EndFrame(void) {
             fprintf(sLog, "# done\n");
             fclose(sLog);
             sLog = NULL;
+        }
+        if (sRec) {
+            fclose(sRec);
+            sRec = NULL;
         }
         _exit(sSyncBad ? 3 : 0);
     }

@@ -157,6 +157,11 @@ Vtx gPlayerEightVtx[] = {
     { { { -9, 0, -6 }, 0, { 4032, 3776 }, { 0xFF, 0xFF, 0xFF, 0xFF } } },
     { { { -9, 9, -6 }, 0, { 4032, 1984 }, { 0xFF, 0xFF, 0xFF, 0xFF } } },
 };
+/* Sizes for the rollback code (the kart sprite quads are drawing-only state). */
+const size_t gPlayerVtxSize[8] = { sizeof(gPlayerOneVtx),  sizeof(gPlayerTwoVtx), sizeof(gPlayerThreeVtx),
+                                   sizeof(gPlayerFourVtx), sizeof(gPlayerFiveVtx), sizeof(gPlayerSixVtx),
+                                   sizeof(gPlayerSevenVtx), sizeof(gPlayerEightVtx) };
+
 
 Vtx D_800E51D0[] = {
     { { { 9, 0, 9 }, 0, { 4032, 0 }, { 0xFF, 0xFF, 0xFF, 0xFF } } },

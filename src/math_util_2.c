@@ -863,6 +863,7 @@ struct ObjectInterpData2 {
     f32 x, y;
 };
 struct ObjectInterpData2 prevObject2[OBJECT_LIST_SIZE] = { 0 };
+const size_t gPrevObject2Size = sizeof(prevObject2); /* drawing-only state, for the rollback code */
 
 s32 mtxf_set_matrix_gObjectList(s32 objectIndex, Mat4 transformMatrix) {
     f32 sinX;
