@@ -23,6 +23,7 @@
 #include <sounds.h>
 #include "spawn_players.h"
 #include "port/Game.h"
+#include "port/KartNet.h"
 
 /** BSS **/
 s32 gIntroModelZEye;
@@ -1043,7 +1044,7 @@ void splash_menu_act(struct Controller* controller, u16 controllerIdx) {
                 if (btnAndStick & (R_JPAD | L_JPAD)) {
                     play_sound2(SOUND_MENU_CURSOR_MOVE);
                     if (gEnableDebugMode) {
-                        gEnableDebugMode = CVarGetInteger("gEnableDebugMode", 0);
+                        gEnableDebugMode = KartNet_InSession() ? 0 : CVarGetInteger("gEnableDebugMode", 0); /* off online */
                     } else {
                         gEnableDebugMode = true;
                     }
@@ -1314,12 +1315,12 @@ void main_menu_act(struct Controller* controller, u16 controllerIdx) {
                 break;
             }
             case MAIN_MENU_PLAYER_SELECT: {
-                if ((btnAndStick & R_JPAD) && gPlayerCount < 4) {
+                if ((btnAndStick & R_JPAD) && gPlayerCount < KartNet_MaxPlayers()) { /* online: the people in the session */
                     gPlayerCount += 1;
                     reset_cycle_flash_menu();
                     play_sound2(SOUND_MENU_CURSOR_MOVE);
                 }
-                if ((btnAndStick & L_JPAD) && gPlayerCount >= 2) {
+                if ((btnAndStick & L_JPAD) && gPlayerCount > KartNet_MinPlayers()) { /* online: 2+ */
                     gPlayerCount -= 1;
                     reset_cycle_flash_menu();
                     play_sound2(SOUND_MENU_CURSOR_MOVE);
@@ -1911,16 +1912,16 @@ void load_menu_states(s32 menuSelection) {
         case 0:
         case START_MENU: {
             set_mirror_mode(0);
-            gEnableDebugMode = CVarGetInteger("gEnableDebugMode", 0);
+            gEnableDebugMode = KartNet_InSession() ? 0 : CVarGetInteger("gEnableDebugMode", 0); /* off online */
             CM_SetCup(GetMushroomCup());
             gCupSelection = MUSHROOM_CUP;
             gCourseIndexInCup = 0;
             gTimeTrialDataCourseIndex = 0;
-            if (gPlayerCount <= 0) {
-                gPlayerCount = 1;
+            if (gPlayerCount < KartNet_MinPlayers()) {
+                gPlayerCount = KartNet_MinPlayers();
             }
-            if (gPlayerCount >= 5) {
-                gPlayerCount = 4;
+            if (gPlayerCount > KartNet_MaxPlayers()) {
+                gPlayerCount = KartNet_MaxPlayers();
             }
             gScreenModeListIndex = sScreenModeIdxFromPlayerMode[gPlayerCount - 1];
             func_800CA008(0, 0);
@@ -1930,7 +1931,7 @@ void load_menu_states(s32 menuSelection) {
         }
         case 1:
         case MAIN_MENU: {
-            gEnableDebugMode = CVarGetInteger("gEnableDebugMode", 0);
+            gEnableDebugMode = KartNet_InSession() ? 0 : CVarGetInteger("gEnableDebugMode", 0); /* off online */
             set_mirror_mode(0);
             gTrackMapInit = 0;
             func_800B5F30();
@@ -1948,7 +1949,7 @@ void load_menu_states(s32 menuSelection) {
                 case MENU_FADE_TYPE_MAIN: {
                     gMainMenuSelection = MAIN_MENU_PLAYER_SELECT;
                     play_sequence(MUSIC_SEQ_MAIN_MENU);
-                    gPlayerCount = 1;
+                    gPlayerCount = KartNet_MinPlayers(); /* 1, or 2 in an online session */
                     if (gScreenModeSelection >= NUM_SCREEN_MODES || gScreenModeSelection < 0) {
                         gScreenModeSelection = SCREEN_MODE_1P;
                     }

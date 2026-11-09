@@ -159,6 +159,9 @@ size_t GetCupSize();
 
 void* GetTrack(void);
 
+/* Name of the World's current track ("" if none), for logs. */
+const char* CM_GetTrackName(void);
+
 struct Actor* CM_GetActor(size_t index);
 void CM_DeleteActor(size_t index);
 struct Actor* CM_AddBaseActor();

@@ -1,3 +1,4 @@
+#include "port/KartNet.h"
 #include <libultraship.h>
 #include <libultra/types.h>
 #include <macros.h>
@@ -5045,7 +5046,8 @@ void draw_fade_in(s32 arg0, s32 arg1, s32 arg2) {
             break;
     }
 
-    if ((arg1 == 0) &&
+    /* netplay: screens 0-3 advance in the race logic instead (netplay_advance_screen_transitions) */
+    if ((arg1 == 0) && !(arg0 < 4 && KartNet_TransitionsInLogic()) &&
         (gCurrentTransitionTime[arg0] += 1, (gCurrentTransitionTime[arg0] >= gTransitionDuration[arg0]))) {
         if (gGamestate == 4) {
             gTransitionType[arg0] = 6;
@@ -5494,10 +5496,52 @@ void func_8009D77C(s32 arg0, s32 arg1, s32 arg2) {
             break;
     }
 
-    if (arg1 == 0) {
+    if (arg1 == 0 && !(arg0 < 4 && KartNet_TransitionsInLogic())) {
         gCurrentTransitionTime[arg0]++;
         if ((gTransitionDuration[arg0] + 1) < gCurrentTransitionTime[arg0]) {
             func_8009CE64(arg0);
+        }
+    }
+}
+
+/* Netplay: each device draws only its own player's screen, but a screen's
+ * fade (and what happens when it ends, e.g. leaving the race after Quit) only
+ * advanced while that screen was drawn, and re-simulated frames draw nothing.
+ * In netplay the race logic advances the fades of all screens instead, once
+ * per game tick, with the same rules as the drawing code (func_8009CA6C,
+ * draw_fade_in, func_8009D77C); the drawing then only draws them. */
+void netplay_advance_screen_transitions(void) {
+    if ((find_menu_items(0x000000AA) != NULL) || (find_menu_items(0x000000AB) != NULL) ||
+        (find_menu_items(0x000000B9) != NULL) || (find_menu_items(0x000000BA) != NULL) ||
+        (find_menu_items(0x000000AC) != NULL) || (find_menu_items(0x000000B0) != NULL)) {
+        return;
+    }
+    if (gIsGamePaused != 0) {
+        return;
+    }
+    for (s32 s = 0; s < 4; s++) {
+        switch (gTransitionType[s]) {
+            case 1:
+            case 8: /* fade in */
+                gCurrentTransitionTime[s]++;
+                if (gCurrentTransitionTime[s] >= gTransitionDuration[s]) {
+                    if (gGamestate == 4) {
+                        gTransitionType[s] = 6;
+                    } else {
+                        gTransitionType[s] = 0;
+                        unref_D_8018EE0C = 0;
+                    }
+                }
+                break;
+            case 2:
+            case 7: /* fade out */
+                gCurrentTransitionTime[s]++;
+                if ((gTransitionDuration[s] + 1) < gCurrentTransitionTime[s]) {
+                    func_8009CE64(s);
+                }
+                break;
+            default:
+                break;
         }
     }
 }

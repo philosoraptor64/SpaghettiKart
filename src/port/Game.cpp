@@ -736,6 +736,11 @@ void* GetTrack(void) {
     return GetWorld()->GetTrack();
 }
 
+const char* CM_GetTrackName(void) {
+    Track* track = GetWorld()->GetTrack();
+    return track ? track->Props.Name : "";
+}
+
 struct Actor* CM_GetActor(size_t index) {
     if (index >= 0 && index < GetWorld()->Actors.size()) {
         AActor* actor = GetWorld()->Actors[index].get();

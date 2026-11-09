@@ -599,7 +599,9 @@ void race_begin_viewport_4p(ScreenContext* screen) {
 
 void render_screens(ScreenContext* screen, s32 mode, s32 someId, s32 playerId) {
     Camera* camera = screen->camera;
-    s32 screenId = screen - gScreenContexts;
+    /* netplay full-screen view: drawn through a spare slot, but it is the
+     * local player's screen (own balloons and effects, its camera) */
+    s32 screenId = KartNet_ScreenIndex(screen - gScreenContexts);
 
     if (NULL == camera) {
         printf("[skybox_and_splitscreen.c] Skipping rendering for screen %ld. This viewport has no camera\n",

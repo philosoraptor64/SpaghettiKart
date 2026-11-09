@@ -81,6 +81,10 @@ static unsigned long sMaxTicks = 0;  /* 0 = unlimited */
 static void LoadReplay(const char* path);
 static int sBot = 0;
 static int sBotDrift = 0; /* MK64_NET_BOT_DRIFT=1: the bot also drifts */
+static long sBotQuitAt = 0; /* MK64_NET_BOT_QUIT=n: session bot quits each race n ticks in */
+static int sBotExplore = 0;
+static unsigned int sExploreRng = 1;
+static int sExploreModePicks = 2; /* game modes picked so far (picks the next one); starts at battle */
 static unsigned int sBotState = 1;
 static int sBotSteer = 0, sBotTarget = 0;
 
@@ -120,6 +124,24 @@ static long sLastRecorded = -1;
 static unsigned long sRbCount = 0, sRbFrames = 0, sRbMaxDepth = 0, sHolds = 0;
 static int sDesyncLogged = 0;
 
+/* Session mode (MK64_NET_SESSION=1): both games run as one console from the
+ * start-up wait on: the intro, the title screen, the game's own menus (host's
+ * controller = player 1, guest's = player 2), races, results and the next
+ * race, all from the exchanged inputs. Menus and race setup run in lockstep;
+ * a race switches to rollback once it is MK64_NET_ROLLBACK_FROM ticks old.
+ * Game-state changes (race -> menus, next race) run outside anything a
+ * rollback can undo, so a pending one first waits until every input before it
+ * is confirmed and any misprediction is corrected (GateTransition). */
+static int sSession = 0;
+/* People in the session, one per device (player index = device). Only 2 is
+ * connected up today (the handshake, records and the local view are 2-player);
+ * the menus and the input exchange already follow this number. */
+static int sSessionPlayers = 2;
+static int sRbActive = 0;      /* rollback window open right now */
+static long sRaceStartTick = -1; /* tick the current race (RACING) began, -1 = not racing */
+static int sMenuDelayCeiling = 6; /* MK64_NET_MENU_MAX_DELAY: auto-delay ceiling in lockstep parts */
+static int sLastCeiling = -1;
+
 /* Desync forensics. Every race writes "<log>.rec": the race config, every
  * confirmed tick's inputs for both players ("i tick b0 x0 y0 b1 x1 y1") and
  * every checkpoint hash ("h tick hash"). MK64_NET_PLAYBACK=<file.rec> re-runs
@@ -136,6 +158,7 @@ static long sDetailTick[DETAIL_RING];
 static u16 sDetailSeed[DETAIL_RING];
 static s32 sDetailState[DETAIL_RING];
 static int sPlayback = 0;
+static int sStartShift = -1; /* Start presses take effect late in races (rollback); -1 = as sRollback */
 static unsigned long sPlayLen = 0;
 static u16* sPlayButtons = NULL;
 static s8* sPlayStick = NULL;
@@ -571,7 +594,19 @@ static void LoadPlayback(const char* path) {
         unsigned long t;
         unsigned int b0, b1, h, seed;
         int x0, y0, x1, y1, mode, cup, course, cc, c0, c1, delay;
-        if (sscanf(line, "# race: seed=0x%x mode=%d cup=%d course=%d cc=%d chars=%d,%d delay=%d", &seed, &mode, &cup,
+        int rb;
+        unsigned int win;
+        if (sscanf(line, "# session: seed=0x%x delay=%d rollback=%d window=%u", &seed, &delay, &rb, &win) == 4) {
+            sSeed = seed;
+            sDelay = delay;
+            sSession = 1;
+            sStartShift = rb;
+            sRbWindow = win;
+            haveRace = 1;
+        } else if (sscanf(line, "# rollback=%d window=%u", &rb, &win) == 2) {
+            sStartShift = rb;
+            sRbWindow = win;
+        } else if (sscanf(line, "# race: seed=0x%x mode=%d cup=%d course=%d cc=%d chars=%d,%d delay=%d", &seed, &mode, &cup,
                    &course, &cc, &c0, &c1, &delay) == 8) {
             sSeed = seed;
             sMode = mode;
@@ -612,6 +647,7 @@ static void LoadPlayback(const char* path) {
     }
     sPlayback = 1;
     sIsHost = 1;
+    sStartShift = sStartShift && sRbWindow > 0; /* as recorded */
     sLocalPlayer = (int) EnvInt("MK64_NET_PLAYBACK_VIEW", 0) ? 1 : 0;
     sRollback = 0;
     sState = NET_RUNNING;
@@ -665,6 +701,8 @@ static void Init(void) {
         sSingleView = !(view && strcmp(view, "double") == 0);
     }
     sRollback = EnvInt("MK64_NET_ROLLBACK", 1) != 0 && Rollback_Supported();
+    sSession = EnvInt("MK64_NET_SESSION", 0) != 0;
+    sMenuDelayCeiling = (int) EnvInt("MK64_NET_MENU_MAX_DELAY", 6);
     sRbWindow = (uint32_t) EnvInt("MK64_NET_ROLLBACK_WINDOW", 8);
     sRbFrom = EnvInt("MK64_NET_ROLLBACK_FROM", 60);
     if (sRollback && !SimHeap_Enable()) {
@@ -690,6 +728,9 @@ static void Init(void) {
     }
     sBot = (int) EnvInt("MK64_NET_BOT", 0);
     sBotDrift = (int) EnvInt("MK64_NET_BOT_DRIFT", 0);
+    sBotQuitAt = EnvInt("MK64_NET_BOT_QUIT", 0);
+    sBotExplore = EnvInt("MK64_NET_BOT_EXPLORE", 0) != 0;
+    sExploreRng = (unsigned int) EnvInt("MK64_NET_BOT_EXPLORE", 1) * 2654435761u + (sIsHost ? 1u : 7u);
     LoadReplay(getenv("MK64_NET_REPLAY"));
     sBotState = (unsigned int) sBot * 2654435761u + 1;
     if (playback && *playback) {
@@ -798,6 +839,50 @@ int KartNet_IsActive(void) {
 /* ------------------------------------------------------------------------ */
 /* Frame hooks                                                               */
 
+static void GateTransition(void);
+void apply_gamestate_change(void); /* main.c */
+/* Session mode, at the top of a frame, before main.c applies a pending game
+ * state change: make it safe (GateTransition), then note races starting and
+ * ending. 2-player races use the left/right split: each device draws only its
+ * own player full screen (KartNet_RenderLocalView), which is built on it. */
+/* Rollback re-simulates race logic without drawing. That is exact while
+ * racing (SyncTest: drawing changes no logic state then), but the pause menu,
+ * the quit fade, the results screens and game-state changes run logic in the
+ * drawing code or outside the re-simulated part. So rollback runs only while
+ * none of them is active; going into one first waits for confirmed inputs
+ * (GateTransition). A pause can't come from a misprediction: Start presses
+ * take effect ROLLBACK_WINDOW + 1 ticks late (ApplyNetPads). */
+static int RaceRollbackSafe(void) {
+    return gGamestate == RACING && gGamestateNext == gGamestate && !gIsGamePaused && !gIsInQuitToMenuTransition &&
+           (gRaceState == RACE_STAGING || gRaceState == RACE_IN_PROGRESS);
+}
+
+static void SessionBeforeGamestate(void) {
+    if (sRbActive && !RaceRollbackSafe()) {
+        GateTransition();
+        if (sState != NET_RUNNING) {
+            return;
+        }
+    }
+    if (gGamestateNext == gGamestate || !sSession) {
+        return;
+    }
+    Log("tick %lu: game state %d -> %d (menu %d, players %d, mode %d)", sTick, gGamestate, gGamestateNext,
+        gMenuSelection, gPlayerCount, gModeSelection);
+    if (gGamestateNext == RACING) {
+        if (gScreenModeSelection == SCREEN_MODE_2P_SPLITSCREEN_HORIZONTAL) {
+            gScreenModeSelection = SCREEN_MODE_2P_SPLITSCREEN_VERTICAL;
+        }
+        sRaceStartTick = (long) sTick;
+        Log("race starts at tick %lu (players %d, mode %d, cc %d, cup cursor %d, track '%s', chars %d %d)", sTick,
+            gPlayerCount, gModeSelection, gCCSelection, (int) GetCupCursorPosition(), CM_GetTrackName(),
+            gCharacterSelections[0], gCharacterSelections[1]);
+    } else if (sRaceStartTick >= 0) {
+        Log("race over at tick %lu (to game state %d)", sTick, gGamestateNext);
+        sRaceStartTick = -1;
+    }
+}
+
 void KartNet_BeginFrame(void) {
     if (!sInitDone) {
         Init();
@@ -844,6 +929,26 @@ void KartNet_BeginFrame(void) {
     if (sState != NET_RUNNING) {
         return;
     }
+    if (!sRaceRequested && sBootFrames >= START_BOOT_FRAME && sSession) {
+        sRaceRequested = 1; /* inputs flow from here on; the game boots on into its menus */
+        if (sLog) {
+            fprintf(sLog, "# session: seed=0x%04x delay=%d\n", sSeed, sDelay);
+        }
+        if (sRec) {
+            fprintf(sRec, "# session: seed=0x%04x delay=%d rollback=%d window=%u\n", sSeed, sDelay, sRollback, sRbWindow);
+            fprintf(sRec, "# %s, build %s\n", sIsHost ? "host (player 1)" : "guest (player 2)", KARTNET_BUILD_ID);
+        }
+        Log("session started (boot frame %lu): menus in lockstep, races with %s", sBootFrames,
+            sRollback ? "rollback" : "lockstep");
+    }
+    if (sSession && sRaceRequested) {
+        /* The menus load the debug-mode setting from each device's own
+         * settings, and it changes the game (e.g. Z starts a race): off. */
+        gEnableDebugMode = 0;
+    }
+    if (sRaceRequested && (sNet || sPlayback)) {
+        SessionBeforeGamestate(); /* (playback: only notes races starting and ending) */
+    }
     if (!sRaceRequested && sBootFrames >= START_BOOT_FRAME) {
         sRaceRequested = 1;
         RaceStartParams p;
@@ -863,6 +968,7 @@ void KartNet_BeginFrame(void) {
         if (sRec) {
             fprintf(sRec, "# race: seed=0x%04x mode=%d cup=%d course=%d cc=%d chars=%d,%d delay=%d\n", sSeed, sMode,
                     sCup, sCourse, sCC, sChars[0], sChars[1], sDelay);
+            fprintf(sRec, "# rollback=%d window=%u\n", sRollback, sRbWindow);
             fprintf(sRec, "# %s, build %s\n", sIsHost ? "host (player 1)" : "guest (player 2)", KARTNET_BUILD_ID);
         }
         Log("race requested (boot frame %lu)", sBootFrames);
@@ -906,7 +1012,113 @@ static void LoadReplay(const char* path) {
     Log("# local input: replay %s (%lu frames)", path, sReplayLen);
 }
 
+/* MK64_NET_BOT_EXPLORE=seed (session tests): wander through the menus with
+ * random presses (other player counts, modes incl. time trials and battle,
+ * cc, characters, cups, tracks), drive in races, and now and then pause and
+ * pick a random pause option (retry, course/driver change, quit). Stays out of
+ * the options and data menus (erase-save). */
+static long sExplorePauseAt = -1;
+static unsigned int ExploreRand(void) {
+    unsigned int x = sExploreRng;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    sExploreRng = x;
+    return x;
+}
+static NetPad DriveInput(unsigned long f);
+static NetPad ExploreInput(unsigned long f) {
+    NetPad pad = { 0, 0, 0 };
+    if (gGamestate != RACING) {
+        sExplorePauseAt = -1;
+        if (gMenuSelection == OPTIONS_MENU || gMenuSelection == DATA_MENU) {
+            if (f % 15 == 0) {
+                pad.button = B_BUTTON;
+            }
+            return pad;
+        }
+        if (sIsHost && gMenuSelection == MAIN_MENU && gMainMenuSelection == MAIN_MENU_MODE_SELECT && gPlayerCount >= 1) {
+            /* the host steers the game mode in rotation (for 2 players:
+             * grand prix, versus, battle), so every mode gets played */
+            if (f % 12 == 0) {
+                const int col = gGameModeMenuColumn[gPlayerCount - 1];
+                const int target = sExploreModePicks % 3;
+                pad.button = col < target ? D_JPAD : col > target ? U_JPAD : A_BUTTON;
+                if (pad.button == A_BUTTON) {
+                    sExploreModePicks++; /* next time, the next mode */
+                }
+            }
+            return pad;
+        }
+        if (f % 12 == 0) {
+            unsigned int r = ExploreRand() % 100;
+            pad.button = r < 35 ? A_BUTTON
+                         : r < 52 ? R_JPAD
+                         : r < 69 ? L_JPAD
+                         : r < 84 ? D_JPAD
+                         : r < 97 ? U_JPAD
+                                  : B_BUTTON;
+        }
+        return pad;
+    }
+    if (sRaceStartTick < 0) {
+        return pad;
+    }
+    long r = (long) sTick - sRaceStartTick;
+    if (sExplorePauseAt < 0) {
+        /* the host pauses every race, the guest in about a third */
+        sExplorePauseAt = (sIsHost || ExploreRand() % 3 == 0) ? 200 + (long) (ExploreRand() % 900) : 1L << 30;
+    }
+    if (r >= sExplorePauseAt) {
+        long k = r - sExplorePauseAt;
+        /* Start takes effect ROLLBACK_WINDOW + 1 ticks late; once the pause
+         * menu is gone again (Continue), drive on and pause again later */
+        if (k > 60 && !gIsGamePaused) {
+            sExplorePauseAt = r + 150 + (long) (ExploreRand() % 600);
+            return DriveInput(f);
+        }
+        if (k == 0) {
+            pad.button = START_BUTTON;
+        } else if (k % 15 == 0) {
+            unsigned int c = ExploreRand() % 100;
+            pad.button = c < 35 ? D_JPAD : c < 50 ? U_JPAD : A_BUTTON;
+        }
+        return pad;
+    }
+    return DriveInput(f);
+}
+
 static NetPad BotInput(unsigned long f) {
+    NetPad pad = { 0, 0, 0 };
+    if (sSession && sBotExplore) {
+        return ExploreInput(f);
+    }
+    if (sSession && gGamestate != RACING) {
+        /* Menus: press A now and then (on through every screen); the host
+         * first picks 2 players on the main menu. */
+        if (sIsHost && gMenuSelection == MAIN_MENU && gPlayerCount == 1) {
+            if (f % 30 == 15) {
+                pad.button = R_JPAD;
+            }
+        } else if (f % 30 == 0) {
+            pad.button = A_BUTTON;
+        }
+        return pad;
+    }
+    if (sSession && sIsHost && sRaceStartTick >= 0 && sBotQuitAt > 0) {
+        /* session test: leave the race through the pause menu (Start, then
+         * down and A now and then), back to the menus for the next race */
+        long r = (long) sTick - sRaceStartTick;
+        if (r >= sBotQuitAt && r < sBotQuitAt + 200) {
+            long k = r - sBotQuitAt;
+            pad.button = (k == 0) ? START_BUTTON : (k % 40 == 20) ? D_JPAD : (k % 40 == 0) ? A_BUTTON : 0;
+            return pad;
+        }
+    }
+    return DriveInput(f);
+}
+
+static NetPad DriveInput(unsigned long f) {
     NetPad pad = { 0, 0, 0 };
     if (f % 20 == 0) {
         unsigned int x = sBotState;
@@ -957,11 +1169,39 @@ static void NetLogCb(const char* fmt, ...) {
     }
 }
 
+/* The exchanged (or, in playback, recorded) input of player p for tick. */
+static void GetPad(int p, long tick, n64net_pad* out) {
+    if (sPlayback) {
+        n64net_pad none = { 0, 0, 0 };
+        *out = none;
+        if (tick >= 0 && (unsigned long) tick < sPlayLen) {
+            out->buttons = sPlayButtons[tick * 2 + p];
+            out->stick_x = sPlayStick[tick * 4 + p * 2];
+            out->stick_y = sPlayStick[tick * 4 + p * 2 + 1];
+        }
+        return;
+    }
+    n64net_input_get(sNet, p, (uint32_t) tick, out);
+}
+
 static void ApplyNetPads(unsigned long tick) {
     memset(gControllerPads, 0, sizeof(OSContPad) * 4);
-    for (int p = 0; p < 2; p++) {
+    /* In races Start (pause) takes effect ROLLBACK_WINDOW + 1 ticks late: by
+     * then every device has it confirmed, so no pause is ever predicted. */
+    const long shift = (long) sRbWindow + 1;
+    const long raceStart = sSession ? sRaceStartTick : 0;
+    const int shiftStart = (sStartShift < 0 ? sRollback : sStartShift) && gGamestate == RACING && raceStart >= 0;
+    for (int p = 0; p < sSessionPlayers; p++) {
         n64net_pad pad;
-        n64net_input_get(sNet, p, (uint32_t) tick, &pad);
+        GetPad(p, (long) tick, &pad);
+        if (shiftStart) {
+            pad.buttons &= (uint16_t) ~START_BUTTON;
+            if ((long) tick - shift >= raceStart) {
+                n64net_pad old;
+                GetPad(p, (long) tick - shift, &old);
+                pad.buttons |= old.buttons & START_BUTTON;
+            }
+        }
         gControllerPads[p].button = pad.buttons;
         gControllerPads[p].stick_x = pad.stick_x;
         gControllerPads[p].stick_y = pad.stick_y;
@@ -1079,7 +1319,7 @@ static void NetFrame(const NetPad* local) {
     if (!sNet) {
         n64net_input_config c;
         memset(&c, 0, sizeof(c));
-        c.num_players = 2;
+        c.num_players = sSessionPlayers;
         c.local_player = sLocalPlayer;
         c.session_id = (uint32_t) sSeed ^ 0x4D4B3634u;
         c.start_tick = 0;
@@ -1102,10 +1342,30 @@ static void NetFrame(const NetPad* local) {
             Log("lockstep via n64net_input, delay %d..%d", sDelay, sAdaptive ? sMaxDelay : sDelay);
         }
     }
-    if (sRollback && (long) sTick == sRbFrom) {
-        n64net_input_set_window(sNet, sRbWindow);
+    {
+        /* Rollback only inside a race that is far enough in (its setup isn't
+         * rollback-safe); one-race mode counts from the race request. */
+        const long raceStart = sSession ? sRaceStartTick : 0;
+        const int want = sRollback && raceStart >= 0 && (long) sTick - raceStart >= sRbFrom && RaceRollbackSafe();
+        if (want && !sRbActive) {
+            n64net_input_set_window(sNet, sRbWindow);
+            sRbActive = 1;
+            if (sSession) {
+                Log("tick %lu: rollback on (race state %d)", sTick, gRaceState);
+            }
+        } else if (!want && sRbActive) {
+            n64net_input_set_window(sNet, 0); /* (normally GateTransition already did) */
+            sRbActive = 0;
+        }
+        /* lockstep parts of a session (menus, race setup): allow more input
+         * delay instead of stalling; races keep the low rollback ceiling */
+        const int ceiling = (sSession && !sRbActive) ? sMenuDelayCeiling : sMaxDelay;
+        if (sSession && sAdaptive && ceiling != sLastCeiling) {
+            n64net_input_set_auto_delay(sNet, (uint32_t) sDelay, (uint32_t) ceiling);
+            sLastCeiling = ceiling;
+        }
     }
-    if (sRollback && (long) sTick > sRbFrom && n64net_timesync_should_skip(sNet)) {
+    if (sRbActive && n64net_timesync_should_skip(sNet)) {
         gKartNetHoldFrame = 1; /* we're ahead: show this frame again, let the peer catch up */
         sHolds++;
         return;
@@ -1150,7 +1410,7 @@ static void NetFrame(const NetPad* local) {
         }
         sStallMs += NowMs() - start;
     }
-    if (!sRollback) {
+    if (!sRbActive) {
         ApplyNetPads(sTick);
         return;
     }
@@ -1162,6 +1422,35 @@ static void NetFrame(const NetPad* local) {
     if (depth > 0) {
         Rollback_RestoreDrawingState(); /* the next frame draws from what the last one drew */
     }
+    if (depth > 0 && !RaceRollbackSafe()) {
+        /* The re-simulation ran into a pause, the finish or a game state
+         * change, which the peer (without this rollback) saw at the top of
+         * this tick: confirm it the same way here, apply a pending state
+         * change, and run this tick in lockstep. */
+        SessionBeforeGamestate();
+        if (sState != NET_RUNNING) {
+            return;
+        }
+        if (!sRbActive) {
+            if (gGamestateNext != gGamestate) {
+                Log("state change at tick %lu applied after a rollback", sTick);
+                apply_gamestate_change();
+            }
+            double start = NowMs();
+            while (!n64net_input_ready(sNet, (uint32_t) sTick)) {
+                usleep(500);
+                Poll();
+                n64net_input_resend(sNet);
+                if (NowMs() - start > WAIT_TIMEOUT_MS) {
+                    Log("peer silent at tick %lu; netplay stopped", sTick);
+                    sState = NET_DONE;
+                    return;
+                }
+            }
+            ApplyNetPads(sTick);
+            return;
+        }
+    }
     if (depth > 0) {
         sRbCount++;
         sRbFrames += (unsigned long) depth;
@@ -1172,6 +1461,57 @@ static void NetFrame(const NetPad* local) {
         Log("rollback deeper than the snapshot ring at tick %lu", sTick);
     }
     ApplyNetPads(sTick);
+}
+
+/* A game-state change is pending at the top of tick sTick while rollback is
+ * on: the tick that decided it may have run on a predicted input. Wait until
+ * every input before sTick is confirmed, let n64net correct any misprediction
+ * (which may remove the change), then go to lockstep for what follows. */
+static void GateTransition(void) {
+    const uint32_t T = (uint32_t) sTick;
+    if (T == 0 || !sNet) {
+        return;
+    }
+    double start = NowMs();
+    for (;;) {
+        uint32_t c = n64net_input_confirmed_tick(sNet);
+        if (c != UINT32_MAX && c + 1 >= T) {
+            break;
+        }
+        usleep(500);
+        Poll();
+        n64net_input_resend(sNet);
+        if (NowMs() - start > WAIT_TIMEOUT_MS) {
+            Log("peer silent at tick %lu (state change); netplay stopped", sTick);
+            SetWait(8, "Lost the connection to the other player");
+            sState = NET_DONE;
+            return;
+        }
+        if (NowMs() - start > 1000) {
+            SetWait(0, "Waiting for the other player...");
+            ShowWaiting();
+        }
+    }
+    ClearWait();
+    sSimTick = sTick;
+    n64net_rollback_callbacks cb = { RbSave, RbLoad, RbAdvance, NULL, RB_SLOTS };
+    Rollback_KeepDrawingState();
+    int depth = n64net_rollback_frame(sNet, T, &cb);
+    if (depth > 0) {
+        Rollback_RestoreDrawingState();
+        sRbCount++;
+        sRbFrames += (unsigned long) depth;
+        Log("tick %u: pause/finish/state change re-checked after a %d-tick rollback: %s", T, depth,
+            RaceRollbackSafe() ? "gone" : "still happens");
+    }
+    if (!RaceRollbackSafe()) {
+        n64net_input_set_window(sNet, 0);
+        sRbActive = 0;
+        if (sSession) {
+            Log("tick %u: rollback off (game state %d->%d, race state %d, paused %d, quitting %d)", T, gGamestate,
+                gGamestateNext, gRaceState, gIsGamePaused, gIsInQuitToMenuTransition);
+        }
+    }
 }
 
 void KartNet_OverrideInput(void) {
@@ -1188,13 +1528,7 @@ void KartNet_OverrideInput(void) {
         return;
     }
     if (sPlayback) {
-        if (sTick < sPlayLen) {
-            for (int p = 0; p < 2; p++) {
-                gControllerPads[p].button = sPlayButtons[sTick * 2 + p];
-                gControllerPads[p].stick_x = sPlayStick[sTick * 4 + p * 2];
-                gControllerPads[p].stick_y = sPlayStick[sTick * 4 + p * 2 + 1];
-            }
-        }
+        ApplyNetPads(sTick);
         return;
     }
 
@@ -1265,6 +1599,19 @@ static unsigned long long StateHash(void) {
     h = HashPlayers(h);
     h = Fnv1a(h, &gRandomSeed16, sizeof(gRandomSeed16));
     h = Fnv1a(h, &gGamestate, sizeof(gGamestate));
+    if (sSession && gGamestate != RACING) {
+        /* menus: what has been chosen so far */
+        h = Fnv1a(h, &gMenuSelection, sizeof(gMenuSelection));
+        h = Fnv1a(h, &gPlayerCount, sizeof(gPlayerCount));
+        h = Fnv1a(h, &gModeSelection, sizeof(gModeSelection));
+        h = Fnv1a(h, &gCCSelection, sizeof(gCCSelection));
+        h = Fnv1a(h, &gScreenModeSelection, sizeof(gScreenModeSelection));
+        h = Fnv1a(h, &gCupSelection, sizeof(gCupSelection));
+        h = Fnv1a(h, &gCourseIndexInCup, sizeof(gCourseIndexInCup));
+        h = Fnv1a(h, gCharacterSelections, sizeof(gCharacterSelections[0]) * 4);
+        h = Fnv1a(h, &gMainMenuSelection, sizeof(gMainMenuSelection));
+        h = Fnv1a(h, &gSubMenuSelection, sizeof(gSubMenuSelection));
+    }
     return h;
 }
 
@@ -1447,7 +1794,29 @@ int KartNet_LocalPlayer(void) {
 }
 
 int KartNet_WantsLocalView(void) {
-    return sState != NET_OFF && sRaceRequested && sFullView && gActiveScreenMode == SCREEN_MODE_2P_SPLITSCREEN_VERTICAL;
+    return sState != NET_OFF && sRaceRequested && sFullView && gActiveScreenMode == SCREEN_MODE_2P_SPLITSCREEN_VERTICAL &&
+           (!sSession || gGamestate == RACING);
+}
+
+int KartNet_InSession(void) {
+    return sSession && sState != NET_OFF && sRaceRequested;
+}
+
+int KartNet_MinPlayers(void) {
+    return KartNet_InSession() ? sSessionPlayers : 1; /* everyone in the session gets a kart */
+}
+
+int KartNet_MaxPlayers(void) {
+    return KartNet_InSession() ? sSessionPlayers : 4;
+}
+
+static int sDrawingLocalView = 0;
+int KartNet_ScreenIndex(int slot) {
+    return (sDrawingLocalView && slot == 3) ? sLocalPlayer : slot;
+}
+
+int KartNet_TransitionsInLogic(void) {
+    return KartNet_WantsLocalView();
 }
 
 int KartNet_SkipSplitRender(void) {
@@ -1497,11 +1866,13 @@ void KartNet_RenderLocalView(void* splitStart) {
         D_8018E7E8[i] = D_8018E7E8[4];
         D_8018E810[i] = D_8018E810[4];
     }
+    sDrawingLocalView = 1;
     if (sLocalPlayer == 0) {
         render_screens(view, RENDER_SCREEN_MODE_2P_VERTICAL_PLAYER_ONE, 1, 0);
     } else {
         render_screens(view, RENDER_SCREEN_MODE_2P_VERTICAL_PLAYER_TWO, 2, 1);
     }
+    sDrawingLocalView = 0;
     gScreenAspect = aspect;
     for (int i = 0; i < 2; i++) {
         D_8018E7E8[i] = boxPos[i];

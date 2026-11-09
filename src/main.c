@@ -756,6 +756,9 @@ void race_logic_loop(void) {
     }
     func_8005A070();
     CM_TickEditor();
+    if (KartNet_TransitionsInLogic() && !gKartNetHoldFrame) {
+        netplay_advance_screen_transitions(); /* netplay: every screen's fade, in the logic */
+    }
     if (gRollbackResim) {
         /* Re-simulating for rollback: logic only. */
         CM_RunGarbageCollector();
@@ -1199,6 +1202,24 @@ void rollback_sim_frame(void) {
     race_logic_loop();
 }
 
+/* Apply a pending game state change (racing, menus, credits, etc.). Also
+ * called by netplay (KartNet.c) when a rollback re-simulated the tick that
+ * decided on a change, so the change lands on the same tick on both sides. */
+void apply_gamestate_change(void) {
+    if (gGamestateNext != gGamestate) {
+        gGamestate = gGamestateNext;
+        if (gGamestate == RACING && SimHeap_Enabled()) {
+            /* Race setup creates the World's objects: in the sim heap. */
+            Rollback_PrepareWorld();
+            SimHeap_Enter();
+            update_gamestate();
+            SimHeap_Leave();
+        } else {
+            update_gamestate();
+        }
+    }
+}
+
 void thread5_iteration(void) {
     func_800CB2C4();
     calculate_delta_time();
@@ -1214,18 +1235,7 @@ void thread5_iteration(void) {
     ReplayCheck_BeginFrame();
     KartNet_BeginFrame();
     // Update the gamestate if it has changed (racing, menus, credits, etc.).
-    if (gGamestateNext != gGamestate) {
-        gGamestate = gGamestateNext;
-        if (gGamestate == RACING && SimHeap_Enabled()) {
-            /* Race setup creates the World's objects: in the sim heap. */
-            Rollback_PrepareWorld();
-            SimHeap_Enter();
-            update_gamestate();
-            SimHeap_Leave();
-        } else {
-            update_gamestate();
-        }
-    }
+    apply_gamestate_change();
     profiler_log_thread5_time(THREAD5_START);
     config_gfx_pool();
     read_controllers();

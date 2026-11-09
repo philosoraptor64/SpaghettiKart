@@ -471,6 +471,7 @@ void func_8009D978(s32, s32);
 void func_8009D998(s32);
 void func_8009DAA8(void);
 void func_8009DB8C(void);
+void netplay_advance_screen_transitions(void);
 void func_8009DEF8(u32, u32);
 void func_8009DF4C(s32);
 void func_8009DF6C(s32);

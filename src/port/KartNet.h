@@ -24,6 +24,11 @@ extern "C" {
  *                           (then BIND/PEER are optional); MK64_NET_ROOM=ABCD,
  *                           MK64_NET_PASSWORD, MK64_NET_RELAY=1, MK64_NET_WAIT_SECS
  *   MK64_NET_ROLLBACK=1     rollback netcode (default; 0 = lockstep); _WINDOW=8, _FROM=60
+ *   MK64_NET_SESSION=1      online session: both games run as one console (intro, the game's
+ *                           own menus with host = player 1 and guest = player 2, races, results,
+ *                           next race); menus in lockstep (MK64_NET_MENU_MAX_DELAY=6), races with
+ *                           rollback. Without it: one race set up by the MK64_NET_* settings.
+ *   MK64_NET_PLAYBACK=f.rec re-run a recorded race/session offline (scripts/kartnet/playback-kart.sh)
  *   MK64_NET_DELAY=2        minimum input delay in frames (host decides)
  *   MK64_NET_ADAPTIVE=1     raise the delay while the network is slow (0 = fixed)
  *   MK64_NET_MAX_DELAY=3    upper limit for the automatic delay (3 with rollback, 6 lockstep)
@@ -37,6 +42,8 @@ extern "C" {
  *   MK64_NET_LOG=path       sync log (relative paths go to Documents on iOS)
  *   MK64_NET_FRAMES=n       quit after n netplay frames (tests)
  *   MK64_NET_BOT=n          scripted driver with seed n instead of the controller (tests)
+ *   MK64_NET_BOT_EXPLORE=n  (session) random menu choices, game modes in rotation, random pauses
+ *                           and pause-menu choices; MK64_NET_BOT_QUIT=n quits each race n ticks in
  *   MK64_NET_TRACE_LAKITU=1 log the start countdown state (tests)
  */
 
@@ -53,6 +60,17 @@ void KartNet_SetPaused(int paused);
  * must match on both sides), then calls KartNet_RenderLocalView with the
  * display-list position from before them. */
 int KartNet_WantsLocalView(void);
+/* 1 while the race logic advances the screen fades (menu_items.c netplay_advance_screen_transitions) */
+int KartNet_TransitionsInLogic(void);
+/* render_screens: the screen index to draw as (the full-screen view's spare
+ * slot draws as the local player's screen). */
+int KartNet_ScreenIndex(int slot);
+/* Online session (MK64_NET_SESSION): both games run as one console. */
+int KartNet_InSession(void);
+/* Fewest players the main menu offers: everyone in an online session, else 1. */
+int KartNet_MinPlayers(void);
+/* Most players the main menu offers: the people in an online session, else 4. */
+int KartNet_MaxPlayers(void);
 int KartNet_LocalPlayer(void); /* 0 host, 1 guest */
 void KartNet_RenderLocalView(void* splitStart); /* a Gfx* */
 int KartNet_SkipSplitRender(void);
