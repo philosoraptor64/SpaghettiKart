@@ -24,6 +24,7 @@
  */
 #include "SimHeap.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -116,6 +117,59 @@ void HeapFree(void* p) {
     h->liveBytes -= (size_t) 16 << pre->cls;
 }
 
+/* Re-entry (Reentry.cpp): C++ objects built before main() (tables, maps,
+ * strings in global objects) own heap blocks that the copy of the globals
+ * points to. Record every block allocated before the pristine copy is taken;
+ * at that moment copy their contents; from then on never free them, and put
+ * their contents back on every restore. Then the pre-main heap comes back
+ * exactly as it was, together with the globals. Kept in __DATA,__mkkeep (not
+ * restored), with no allocation of its own while recording. */
+#define MK_KEEP_SECTION __attribute__((section("__DATA,__mkkeep")))
+struct PreBlock {
+    void* p;
+    size_t n;
+    void* copy;
+};
+constexpr size_t kMaxPreBlocks = 1 << 16;
+MK_KEEP_SECTION PreBlock sPre[kMaxPreBlocks];
+MK_KEEP_SECTION size_t sPreCount = 0;
+MK_KEEP_SECTION bool sPreFrozen = false; /* the pristine copy was taken */
+MK_KEEP_SECTION bool sPreOverflow = false;
+
+inline void PreRecord(void* p, size_t n) {
+    if (sPreFrozen || !p) {
+        return;
+    }
+    if (sPreCount < kMaxPreBlocks) {
+        sPre[sPreCount++] = { p, n, nullptr };
+    } else {
+        sPreOverflow = true;
+    }
+}
+
+/* true if p is a recorded pre-main block (after the freeze: never free it) */
+inline bool PreForget(void* p) {
+    if (!sPreFrozen) {
+        for (size_t i = sPreCount; i-- > 0;) { /* freed before main: no longer pristine */
+            if (sPre[i].p == p) {
+                sPre[i] = sPre[--sPreCount];
+                break;
+            }
+        }
+        return false;
+    }
+    size_t lo = 0, hi = sPreCount; /* sorted at the freeze */
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if ((uintptr_t) sPre[mid].p < (uintptr_t) p) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo < sPreCount && sPre[lo].p == p;
+}
+
 inline void* NewImpl(size_t n) {
     if (sEnabled && tScope > 0) {
         void* p = HeapAlloc(n ? n : 1);
@@ -129,6 +183,7 @@ inline void* NewImpl(size_t n) {
     if (!p) {
         throw std::bad_alloc();
     }
+    PreRecord(p, n ? n : 1);
     return p;
 }
 
@@ -139,6 +194,9 @@ inline void DeleteImpl(void* p) {
     if (Owns(p)) {
         HeapFree(p);
         return;
+    }
+    if (sPreCount && PreForget(p)) {
+        return; /* a pre-main block: kept for the next run (re-entry) */
     }
     if (sEnabled && tScope > 0) {
         sOutsideFreesDeferred++; /* see the header comment: leak, don't free */
@@ -158,6 +216,7 @@ inline void* NewAligned(size_t n, std::align_val_t al) {
     if (posix_memalign(&p, (size_t) al, n ? n : 1) != 0) {
         throw std::bad_alloc();
     }
+    PreRecord(p, n ? n : 1);
     return p;
 }
 
@@ -250,6 +309,43 @@ int SimHeap_Enable(void) {
 
 int SimHeap_Enabled(void) {
     return sEnabled;
+}
+
+/* Re-entry (Reentry.cpp): freeze the pre-main blocks (copy their contents)
+ * when the pristine copy of the globals is taken. */
+void SimHeap_FreezePreMainBlocks(void) {
+    if (sPreFrozen) {
+        return;
+    }
+    std::sort(sPre, sPre + sPreCount, [](const PreBlock& a, const PreBlock& b) { return a.p < b.p; });
+    sPreFrozen = true;
+    for (size_t i = 0; i < sPreCount; i++) {
+        sPre[i].copy = malloc(sPre[i].n);
+        memcpy(sPre[i].copy, sPre[i].p, sPre[i].n);
+    }
+    fprintf(stderr, "SimHeap: %zu pre-main C++ blocks kept for re-entry%s\n", sPreCount,
+            sPreOverflow ? " (TABLE FULL: some missed)" : "");
+}
+
+/* ...and put their contents back with the globals. */
+void SimHeap_RestorePreMainBlocks(void) {
+    for (size_t i = 0; i < sPreCount; i++) {
+        memcpy(sPre[i].p, sPre[i].copy, sPre[i].n);
+    }
+}
+
+/* Re-entry (Reentry.cpp): after the game shut down, give the reservation
+ * back; the globals that point into it are reset next. Nothing may run in a
+ * scope now. */
+void SimHeap_ReleaseForReentry(void) {
+    if (!sBase) {
+        return;
+    }
+    munmap(sBase, kReserve);
+    sBase = nullptr;
+    sEnabled = false;
+    LUS_AllocScopeSuspend = nullptr;
+    LUS_AllocScopeResume = nullptr;
 }
 
 void SimHeap_Enter(void) {

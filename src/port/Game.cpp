@@ -1121,6 +1121,13 @@ void CM_ThrowRuntimeError(const char* fmt, ...) {
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
 #endif
+#include "port/Reentry.h"
+#include <spdlog/sinks/stdout_color_sinks.h>
+#include "port/SimHeap.h"
+#include <spdlog/spdlog.h>
+#include <algorithm>
+
+static void GameMainOnce(unsigned long soakFrames, bool fullShutdown);
 
 #ifdef _WIN32
 int SDL_main(int argc, char** argv) {
@@ -1157,6 +1164,34 @@ extern "C"
     SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0");
     IosInstallLifecycleWatch();
 #endif
+    Reentry_SavePristine(); // before the game runs: every global as it starts
+    const char* soakEnv = getenv("MK64_SOAK");
+    const int cycles = soakEnv ? std::max(1, atoi(soakEnv)) : 1;
+    const char* soakFramesEnv = getenv("MK64_SOAK_FRAMES");
+    const unsigned long soakFrames = cycles > 1 ? (soakFramesEnv ? strtoul(soakFramesEnv, nullptr, 0) : 600) : 0;
+    for (int cycle = 0; cycle < cycles; cycle++) {
+        if (cycle > 0) {
+            SimHeap_ReleaseForReentry();
+            Reentry_RestorePristine();
+        }
+        GameMainOnce(soakFrames, cycles > 1);
+        unsigned long copiedKb, zeroKb, footprintKb;
+        unsigned int threads;
+        Reentry_Stats(&copiedKb, &zeroKb, &footprintKb, &threads);
+        fprintf(stderr, "MK64 soak: cycle %d/%d done, footprint %lu KB, threads %u (globals: %lu KB copied, %lu KB zero pages)\n",
+                cycle + 1, cycles, footprintKb, threads, copiedKb, zeroKb);
+    }
+    // Everything user-visible (config, saves) is persisted by Destroy(). Skip the
+    // remaining static destructors: their order is unspecified and some log after
+    // spdlog's own statics are gone, crashing on quit (same class as issue #689).
+    // Mirrors the _Exit precedent on the extraction error paths.
+    _Exit(0);
+}
+
+/* One run of the game, start to shutdown. soakFrames > 0: stop after that many
+ * frames. fullShutdown: also destroy libultraship's context and spdlog's
+ * loggers, so the next run (after Reentry_RestorePristine) starts clean. */
+static void GameMainOnce(unsigned long soakFrames, bool fullShutdown) {
     // load_wasm();
     GameEngine::Create();
     audio_init();
@@ -1186,15 +1221,18 @@ extern "C"
 
     thread5_game_loop();
     gEditor.Load();
-    while (WindowIsRunning()) {
+    unsigned long frames = 0;
+    while (WindowIsRunning() && (soakFrames == 0 || frames++ < soakFrames)) {
         push_frame();
     }
     CustomEngineDestroy();
     // GameEngine::Instance->ProcessFrame(push_frame);
     GameEngine::Instance->Destroy();
-    // Everything user-visible (config, saves) is persisted by Destroy(). Skip the
-    // remaining static destructors: their order is unspecified and some log after
-    // spdlog's own statics are gone, crashing on quit (same class as issue #689).
-    // Mirrors the _Exit precedent on the extraction error paths.
-    _Exit(0);
+    if (fullShutdown) {
+        Ship::Context::DestroyInstance(); // window, renderer, resource threads, audio, config
+        spdlog::shutdown();               // spdlog is a shared library: drop its loggers and thread pool
+        // ...and give it a plain default logger again (what a fresh process has),
+        // for the log lines the next start writes before libultraship sets up its own.
+        spdlog::set_default_logger(spdlog::stderr_color_mt("mk64"));
+    }
 }

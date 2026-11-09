@@ -10,6 +10,9 @@ extern "C" {
 /* Fixed-address heap for the C++ simulation objects (SimHeap.cpp). */
 int SimHeap_Enable(void);  /* reserve it; until then everything uses the system heap */
 int SimHeap_Enabled(void);
+void SimHeap_ReleaseForReentry(void); /* after a full shutdown (Reentry.cpp) */
+void SimHeap_FreezePreMainBlocks(void);  /* with Reentry_SavePristine */
+void SimHeap_RestorePreMainBlocks(void); /* with Reentry_RestorePristine */
 void SimHeap_Enter(void);  /* game thread: C++ allocations go to the sim heap (nestable) */
 void SimHeap_Leave(void);
 int SimHeap_Suspend(void); /* temporarily back to the system heap (engine caches) */
