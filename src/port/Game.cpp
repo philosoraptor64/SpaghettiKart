@@ -1282,6 +1282,12 @@ extern "C" int Port_RunFrame(void) {
 }
 
 extern "C" void Port_RunEnd(int fullShutdown) {
+    // Inside a host (i64) the process outlives the run: the watch installed at
+    // start must go, or it piles up and keeps calling into this game's code
+    // while another game runs.
+#if defined(PLATFORM_IOS)
+    SDL_DelEventWatch(IosLifecycleWatch, nullptr);
+#endif
     CustomEngineDestroy();
     // GameEngine::Instance->ProcessFrame(push_frame);
     GameEngine::Instance->Destroy();
