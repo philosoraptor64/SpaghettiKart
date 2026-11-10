@@ -65,7 +65,7 @@ extern OSContPad gControllerPads[4];
 enum { NET_OFF, NET_HANDSHAKE, NET_RUNNING, NET_DONE };
 
 #define HASH_EVERY 30     /* frames between state-hash checkpoints */
-#define WAIT_TIMEOUT_MS 20000   /* give up if the peer is silent this long (and not paused) */
+#define WAIT_TIMEOUT_MS_DEFAULT 20000   /* give up if the peer is silent this long (and not paused) */
 #define PAUSED_TIMEOUT_MS 600000 /* ... or paused (app in the background) this long */
 #define START_BOOT_FRAME 30      /* both sides wait here, so they start from identical states */
 
@@ -321,6 +321,17 @@ static const u8 kMagic[4] = { 'M', 'K', 'N', '1' };
  * src/port/i64_module.cpp for an online run. */
 int (*gKartNetHostSend)(const void* data, uint32_t size) = NULL;
 int (*gKartNetHostRecv)(void* buf, uint32_t cap) = NULL;
+/* i64 module: the host says the other player left the game or the session
+ * (checked in every blocking wait, so a wait never outlives the friend). */
+int (*gKartNetHostPeerLeft)(void) = NULL;
+static int HostPeerGone(void) {
+    return gKartNetHostPeerLeft != NULL && gKartNetHostPeerLeft();
+}
+/* Inside i64 the host's session decides when the friend is gone (it rides
+ * out silences of up to two minutes); stand-alone, KartNet's own 20 s. */
+static double WaitTimeoutMs(void) {
+    return gKartNetHostSend != NULL ? 120000.0 : (double) WAIT_TIMEOUT_MS_DEFAULT;
+}
 
 static void SendNow(const u8* buf, size_t len) {
     if (gKartNetHostSend != NULL) {
@@ -1325,7 +1336,12 @@ void KartNet_BeginFrame(void) {
     const double handshakeStart = NowMs();
     while (sState == NET_HANDSHAKE) {
         double now = NowMs();
-        if (sFromUi && now - handshakeStart > 30000) {
+        if (HostPeerGone()) {
+            Log("the other player left before the game started");
+            sState = NET_DONE;
+            break;
+        }
+        if ((sFromUi || gKartNetHostSend != NULL) && now - handshakeStart > 30000) {
             Log("no answer from the other player; giving up");
             SetWait(6, "Your friend's game didn't answer");
             sState = NET_DONE;
@@ -1920,8 +1936,8 @@ static void NetFrame(const NetPad* local) {
                 lastPump = now;
                 SDL_PumpEvents();
             }
-            if (silentMs > (away ? PAUSED_TIMEOUT_MS : WAIT_TIMEOUT_MS) ||
-                (silentMs == 0 && now - start > WAIT_TIMEOUT_MS)) {
+            if (HostPeerGone() || silentMs > (away ? PAUSED_TIMEOUT_MS : WaitTimeoutMs()) ||
+                (silentMs == 0 && now - start > WaitTimeoutMs())) {
                 Log("peer silent at tick %lu; netplay stopped", sTick);
                 SetWait(8, "Lost the connection to the other player");
                 sState = NET_DONE;
@@ -1964,7 +1980,7 @@ static void NetFrame(const NetPad* local) {
                 usleep(500);
                 Poll();
                 n64net_input_resend(sNet);
-                if (NowMs() - start > WAIT_TIMEOUT_MS) {
+                if (NowMs() - start > WaitTimeoutMs() || HostPeerGone()) {
                     Log("peer silent at tick %lu; netplay stopped", sTick);
                     sState = NET_DONE;
                     return;
@@ -2004,7 +2020,7 @@ static void GateTransition(void) {
         usleep(500);
         Poll();
         n64net_input_resend(sNet);
-        if (NowMs() - start > WAIT_TIMEOUT_MS) {
+        if (NowMs() - start > WaitTimeoutMs() || HostPeerGone()) {
             Log("peer silent at tick %lu (state change); netplay stopped", sTick);
             SetWait(8, "Lost the connection to the other player");
             sState = NET_DONE;

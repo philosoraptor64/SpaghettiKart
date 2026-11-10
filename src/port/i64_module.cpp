@@ -44,6 +44,7 @@ extern uint32_t (*gPortHostAudioBuffered)(uint32_t rate);
 /* Online: the host's game channel (KartNet.c). */
 extern int (*gKartNetHostSend)(const void* data, uint32_t size);
 extern int (*gKartNetHostRecv)(void* buf, uint32_t cap);
+extern int (*gKartNetHostPeerLeft)(void);
 int KartNet_NetDone(void);
 void KartNet_Shutdown(void);
 /* SimHeap.cpp: the game's allocator, for the host's operator new */
@@ -81,6 +82,18 @@ KEEP bool sPeerLeft = false;
 KEEP char sNetLog[1100] = {};
 
 const n64_alloc_hooks kAllocHooks = { SimHeap_HookAlloc, SimHeap_HookAllocAligned, SimHeap_HookFree };
+
+/* the host's session events (also polled from KartNet's blocking waits) */
+int PollPeerLeft(void) {
+    if (sHost != nullptr && sHost->net_poll_event != nullptr) {
+        for (int e; (e = sHost->net_poll_event()) != 0;) {
+            if (e == N64_NET_PEER_LEFT) {
+                sPeerLeft = true;
+            }
+        }
+    }
+    return sPeerLeft ? 1 : 0;
+}
 
 void SetEnv(const char* key, const std::string& value) {
     setenv(key, value.c_str(), 1);
@@ -162,6 +175,7 @@ extern "C" N64_GAME_EXPORT int n64_game_start(const n64_host* host, const n64_la
         }
         gKartNetHostSend = host->net_send;
         gKartNetHostRecv = host->net_recv;
+        gKartNetHostPeerLeft = PollPeerLeft;
         /* rollback keeps race objects in SimHeap: libc++'s own allocations
          * must go the same way (n64_alloc_hooks) */
         if (host->set_alloc_hooks != nullptr) {
@@ -187,14 +201,7 @@ extern "C" N64_GAME_EXPORT n64_frame_result n64_game_frame(void) {
         return N64_GAME_FRAME_EXIT;
     }
     if (sOnline) {
-        if (sHost->net_poll_event != nullptr) {
-            for (int e; (e = sHost->net_poll_event()) != 0;) {
-                if (e == N64_NET_PEER_LEFT) {
-                    sPeerLeft = true;
-                }
-            }
-        }
-        if (sPeerLeft || KartNet_NetDone()) {
+        if (PollPeerLeft() || KartNet_NetDone()) {
             return N64_GAME_FRAME_EXIT; /* the other player left: back to i64 */
         }
     }
@@ -216,6 +223,7 @@ extern "C" N64_GAME_EXPORT void n64_game_stop(void) {
     gPortHostAudioBuffered = nullptr;
     gKartNetHostSend = nullptr;
     gKartNetHostRecv = nullptr;
+    gKartNetHostPeerLeft = nullptr;
     if (sOnline && sHost->set_alloc_hooks != nullptr) {
         sHost->set_alloc_hooks(nullptr);
     }
