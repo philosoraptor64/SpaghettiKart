@@ -221,6 +221,33 @@ n64net_add_build_id(${PROJECT_NAME}
           "${CMAKE_SOURCE_DIR}/n64net::client/src/n64net_input.cpp"
           "${CMAKE_SOURCE_DIR}/n64net::client/include/n64net_input.h")
 
+if(SPAGHETTIKART_I64_MODULE)
+  # i64 imports mk64.o2r from the player's ROM (n64_game_import_rom, with the
+  # Torch library the game already links). The recipe id fingerprints the
+  # extraction pipeline, so a module whose recipe changed re-imports.
+  set(MK64_RECIPE_LIST "${CMAKE_BINARY_DIR}/mk64_asset_recipe_entries.txt")
+  file(WRITE "${MK64_RECIPE_LIST}" "${CMAKE_SOURCE_DIR}::config.yml\n${CMAKE_SOURCE_DIR}::yamls\n${CMAKE_SOURCE_DIR}::meta\n${CMAKE_SOURCE_DIR}/torch::src\n")
+  set(MK64_RECIPE_CMD ${CMAKE_COMMAND} -DN64NET_ENTRIES_FILE=${MK64_RECIPE_LIST}
+      -DN64NET_OUT=${CMAKE_BINARY_DIR}/generated/mk64_asset_recipe.h -DN64NET_MACRO=MK64_ASSET_RECIPE
+      -P ${CMAKE_SOURCE_DIR}/n64net/cmake/N64NetBuildId.cmake)
+  execute_process(COMMAND ${MK64_RECIPE_CMD})
+  add_custom_target(mk64_asset_recipe COMMAND ${MK64_RECIPE_CMD}
+    BYPRODUCTS ${CMAKE_BINARY_DIR}/generated/mk64_asset_recipe.h VERBATIM)
+  add_dependencies(${PROJECT_NAME} mk64_asset_recipe)
+  # The module's read-only resources for i64 (n64_host.bundle_dir): the
+  # extraction recipe and the port's own assets. Nothing ROM-derived.
+  set(MK64_MODULE_RES "${CMAKE_BINARY_DIR}/libmk64_i64.resources")
+  add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${MK64_MODULE_RES}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${MK64_MODULE_RES}"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/config.yml" "${MK64_MODULE_RES}/config.yml"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/yamls" "${MK64_MODULE_RES}/yamls"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/meta" "${MK64_MODULE_RES}/meta"
+    COMMAND bash -c "for f in '${CMAKE_BINARY_DIR}/spaghetti.o2r' '${CMAKE_SOURCE_DIR}/spaghetti.o2r'; do [ -f \"$f\" ] && { cp \"$f\" '${MK64_MODULE_RES}/'; exit 0; }; done; echo 'note: spaghetti.o2r not found - build GenerateO2R (or copy it from a Mac build)'"
+    COMMENT "Staging the i64 module resources"
+    VERBATIM)
+endif()
+
 
 # fmt's consteval format-string checking fails to compile under newer
 # AppleClang (Xcode 16+) with the spdlog/fmt versions in use (both vcpkg's on

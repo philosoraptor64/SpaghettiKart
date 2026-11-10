@@ -15,7 +15,12 @@
  * seeded with launch->seed; it ends (frame() returns EXIT) when the other
  * player leaves or KartNet gives up on them.
  *
- * Not yet: the session blob, ROM import on the device, title art, pause. */
+ * ROM import (n64_game_import_rom): Torch (linked for GameExtractor anyway)
+ * turns the player's ROM into <data>/mk64.o2r with the recipe in the
+ * module's resources (config.yml, yamls/, meta/); spaghetti.o2r, the port's
+ * own assets, ships there too and is copied next to it.
+ *
+ * Not yet: the session blob, title art, pause. */
 #if defined(SPAGHETTIKART_I64_MODULE)
 
 #define N64_GAME_BUILDING_MODULE 1
@@ -25,11 +30,21 @@
 #include "SimHeap.h"
 #include "Rollback.h"
 #include "kartnet_build_id.h"
+#include "mk64_asset_recipe.h"
+
+#include "Companion.h"
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
+#include <system_error>
+#include <vector>
 
 extern "C" {
 void Port_RunBegin(void);
@@ -108,12 +123,121 @@ extern "C" N64_GAME_EXPORT const n64_game_info* n64_game_get_info(void) {
 extern "C" N64_GAME_EXPORT int n64_game_import_rom(const n64_host* host, const char* rom_path,
                                                    void (*progress)(float, void*), void* user, char* err,
                                                    size_t err_size) {
-    (void) host;
-    (void) rom_path;
-    (void) progress;
-    (void) user;
-    std::snprintf(err, err_size, "ROM import inside i64 isn't built yet");
-    return 1;
+    namespace fs = std::filesystem;
+    /* Before Torch runs: everything so far is static initialisation, the
+     * pristine state (else Torch's buffers join the "before main" blocks
+     * Reentry keeps forever, and its globals stay changed after a run). */
+    Reentry_SavePristine();
+    if (host == nullptr || rom_path == nullptr || host->data_dir == nullptr || host->bundle_dir == nullptr) {
+        std::snprintf(err, err_size, "missing folders");
+        return 1;
+    }
+    if (sRunning) {
+        std::snprintf(err, err_size, "the game is running");
+        return 1;
+    }
+    if (progress != nullptr) {
+        progress(0.0f, user);
+    }
+    std::error_code ec;
+    const fs::path data(host->data_dir);
+    const fs::path recipe(host->bundle_dir);
+    fs::create_directories(data, ec);
+    if (!fs::exists(recipe / "config.yml", ec) || !fs::exists(recipe / "yamls", ec)) {
+        std::snprintf(err, err_size, "the game's extraction recipe is missing from the module");
+        return 1;
+    }
+
+    std::vector<uint8_t> rom;
+    {
+        std::ifstream in(rom_path, std::ios::binary);
+        rom.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    if (rom.size() < (8u << 20) || rom.size() > (64u << 20) || (rom.size() % 4) != 0) {
+        std::snprintf(err, err_size, "that file isn't an N64 ROM");
+        return 1;
+    }
+    /* Torch wants big-endian (.z64): 80 37 12 40 */
+    if (!(rom[0] == 0x80 && rom[1] == 0x37 && rom[2] == 0x12 && rom[3] == 0x40)) {
+        if (rom[0] == 0x37 && rom[1] == 0x80) { /* .v64: 16-bit byteswapped */
+            for (size_t i = 0; i + 1 < rom.size(); i += 2) {
+                std::swap(rom[i], rom[i + 1]);
+            }
+        } else if (rom[0] == 0x40 && rom[1] == 0x12) { /* .n64: 32-bit little-endian */
+            for (size_t i = 0; i + 3 < rom.size(); i += 4) {
+                std::swap(rom[i], rom[i + 3]);
+                std::swap(rom[i + 1], rom[i + 2]);
+            }
+        } else {
+            std::snprintf(err, err_size, "that file isn't an N64 ROM");
+            return 1;
+        }
+    }
+
+    /* Torch's diagnostics (e.g. an unknown SHA-1) go to <data>/torch.log */
+    auto previousLogger = spdlog::default_logger();
+    try {
+        spdlog::drop("torch");
+        auto log = spdlog::basic_logger_mt("torch", (data / "torch.log").string(), true);
+        log->flush_on(spdlog::level::info);
+        spdlog::set_default_logger(log);
+    } catch (const std::exception&) {
+    }
+
+    const fs::path o2r = data / "mk64.o2r";
+    const fs::path temp = data / "mk64.o2r.importing";
+    fs::remove(temp, ec);
+    std::string outPath;
+    bool ok = false;
+    std::string why;
+    try {
+        /* Torch writes <dest>/mk64.o2r (config.yml's output.binary): use a
+         * scratch folder so a failed run never leaves a partial archive */
+        fs::create_directories(temp, ec);
+        auto* c = new Companion(std::move(rom), ArchiveType::O2R, false, recipe.string(), temp.string());
+        Companion::Instance = c;
+        c->SetAdditionalFiles({ "meta/mods.toml" });
+        c->Init(ExportType::Binary);
+        outPath = c->GetOutputPath();
+        Companion::Instance = nullptr;
+        delete c;
+        ok = !outPath.empty() && fs::exists(outPath, ec);
+        if (outPath.empty()) {
+            why = "this isn't Mario Kart 64 (USA)";
+        } else if (!ok) {
+            why = "not enough space to import the ROM";
+        }
+    } catch (const std::exception& e) {
+        Companion::Instance = nullptr;
+        why = std::string("extracting the game data failed: ") + e.what();
+    }
+    spdlog::drop("torch");
+    spdlog::set_default_logger(previousLogger);
+    if (ok) {
+        fs::rename(outPath, o2r, ec);
+        if (ec) {
+            fs::remove(o2r, ec);
+            fs::rename(outPath, o2r, ec);
+        }
+        ok = !ec;
+        if (!ok) {
+            why = "couldn't store the game data";
+        }
+    }
+    fs::remove_all(temp, ec);
+    if (!ok) {
+        std::snprintf(err, err_size, "%s", why.c_str());
+        return 1;
+    }
+    /* the recipe stamp n64_game_start checks */
+    {
+        std::ofstream stamp(o2r.string() + ".recipe", std::ios::trunc);
+        stamp << MK64_ASSET_RECIPE << "\n";
+    }
+    if (progress != nullptr) {
+        progress(1.0f, user);
+    }
+    return 0;
 }
 
 extern "C" N64_GAME_EXPORT uint32_t n64_game_session_blob(const n64_host* host, void* out, uint32_t cap) {
@@ -138,6 +262,38 @@ extern "C" N64_GAME_EXPORT int n64_game_start(const n64_host* host, const n64_la
         (host->net_send == nullptr || host->net_recv == nullptr || launch->local_player > 1)) {
         std::snprintf(err, err_size, "online needs i64's game channel and 2 players");
         return 1;
+    }
+    /* Game data: mk64.o2r is imported from the player's ROM (above);
+     * spaghetti.o2r comes with the module. A mk64.o2r without a stamp was
+     * copied in by hand from a Mac build: accept it. */
+    if (host->data_dir != nullptr && host->data_dir[0] != '\0') {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        const fs::path data(host->data_dir);
+        const fs::path o2r = data / "mk64.o2r";
+        if (!fs::exists(o2r, ec)) {
+            std::snprintf(err, err_size, "import your Mario Kart 64 ROM first");
+            return 1;
+        }
+        std::ifstream stamp(o2r.string() + ".recipe");
+        std::string have;
+        if (stamp && std::getline(stamp, have) && have != MK64_ASSET_RECIPE) {
+            std::snprintf(err, err_size, "the game data is from another version: import the ROM again");
+            return 1;
+        }
+        if (host->bundle_dir != nullptr && host->bundle_dir[0] != '\0') {
+            const fs::path mine = fs::path(host->bundle_dir) / "spaghetti.o2r";
+            const fs::path used = data / "spaghetti.o2r";
+            if (fs::exists(mine, ec) && fs::path(host->bundle_dir) != data &&
+                (!fs::exists(used, ec) || fs::file_size(mine, ec) != fs::file_size(used, ec) ||
+                 fs::last_write_time(mine, ec) > fs::last_write_time(used, ec))) {
+                fs::copy_file(mine, used, fs::copy_options::overwrite_existing, ec);
+            }
+        }
+        if (!fs::exists(data / "spaghetti.o2r", ec)) {
+            std::snprintf(err, err_size, "spaghetti.o2r is missing from the module");
+            return 1;
+        }
     }
     /* First start: everything the module has done so far is static
      * initialisation, i.e. the pristine state to come back to after a run. */
