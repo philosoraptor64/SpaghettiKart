@@ -282,6 +282,23 @@ void World::CleanWorld(void) {
     Sky::Instance->GetSkyActors().clear();
 }
 
+void World::ReleaseAll(void) {
+    if (Sky::Instance != nullptr) {
+        CleanWorld();
+    }
+    mTrack.reset();
+    RaceManagerInstance.reset();
+    // swap with empty containers: clear() keeps their storage
+    std::vector<Cup*>().swap(Cups);
+    std::vector<std::unique_ptr<GameCamera>>().swap(Cameras);
+    std::vector<std::unique_ptr<StaticMeshActor>>().swap(StaticMeshActors);
+    std::deque<std::unique_ptr<AActor>>().swap(Actors);
+    std::deque<std::unique_ptr<OObject>>().swap(Objects);
+    std::vector<std::unique_ptr<ParticleEmitter>>().swap(Emitters);
+    std::unordered_map<s32, OLakitu*>().swap(Lakitus);
+    std::vector<std::shared_ptr<TrainCrossing>>().swap(Crossings);
+}
+
 void World::CleanActors(void) {
     World::Reset();
     Actors.clear();

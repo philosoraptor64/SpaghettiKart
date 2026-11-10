@@ -161,6 +161,12 @@ void CustomEngineInit() {
 }
 
 void CustomEngineDestroy() {
+    // Inside a host (i64) the process outlives the run and the module's globals
+    // are reset after it: anything they own must be released here, or it leaks
+    // (the world's track, actors and objects, the sky, the track browser).
+    GetWorld()->ReleaseAll();
+    gSky.reset();
+    gTrackBrowser.reset();
     gTrackRegistry.Clear();
     gActorRegistry.Clear();
     gMushroomCup.reset();

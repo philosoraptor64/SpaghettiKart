@@ -160,6 +160,10 @@ void Destroy() {
     mContentBrowserWindow = nullptr;
     mNetplayStatus = nullptr;
     mOnlineWindow = nullptr;
+    // these two were missed: the menu held on to the GUI, which holds the
+    // window and the whole graphics interpreter (all leaked per run in a host)
+    mPortMenu = nullptr;
+    mGfxDebuggerWindow = nullptr;
 }
 
 std::string GetWindowButtonText(const char* text, bool menuOpen) {

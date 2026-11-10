@@ -142,6 +142,27 @@ if(SPAGHETTIKART_I64_MODULE AND SPAGHETTIKART_IOS)
 endif()
 if(SPAGHETTIKART_I64_MODULE)
   set(LUS_OBJC_PREFIX MK64 CACHE STRING "" FORCE)
+  # The module's own spdlog (Mac): Homebrew's is a shared library, which would
+  # outlive the module's runs and be shared with the other games in the host app;
+  # its registry then points into memory the module resets between runs (crash
+  # in the next run's shutdown). Link the static archive instead, as on iOS.
+  if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    find_package(spdlog CONFIG QUIET)
+    if(TARGET spdlog::spdlog)
+      get_target_property(_spdlog_dylib spdlog::spdlog IMPORTED_LOCATION_RELEASE)
+      if(NOT _spdlog_dylib)
+        get_target_property(_spdlog_dylib spdlog::spdlog IMPORTED_LOCATION_NOCONFIG)
+      endif()
+      get_filename_component(_spdlog_dir "${_spdlog_dylib}" DIRECTORY)
+      if(EXISTS "${_spdlog_dir}/libspdlog.a")
+        set_target_properties(spdlog::spdlog PROPERTIES
+          IMPORTED_LOCATION_RELEASE "${_spdlog_dir}/libspdlog.a"
+          IMPORTED_LOCATION_NOCONFIG "${_spdlog_dir}/libspdlog.a"
+          IMPORTED_LOCATION "${_spdlog_dir}/libspdlog.a")
+        message(STATUS "i64 module: static spdlog ${_spdlog_dir}/libspdlog.a")
+      endif()
+    endif()
+  endif()
 endif()
 if(SPAGHETTIKART_I64_MODULE)
   add_library(${PROJECT_NAME} SHARED ${ALL_FILES})

@@ -104,6 +104,9 @@ public:
 
     World* GetWorld(void);
     void CleanWorld(void);
+    // Everything the world owns, storage too: for a host that keeps the
+    // process and starts the game again (i64); a static World is never destroyed.
+    void ReleaseAll(void);
     void CleanActors(void);
 
     // getter/setter for current track

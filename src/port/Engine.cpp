@@ -368,6 +368,10 @@ void GameEngine::Create() {
 
 void GameEngine::Destroy() {
     AudioExit();
+    // the audio thread has stopped: the HMAS mixer (miniaudio engine, its
+    // sounds) goes too; it was never deleted (leaked per run in a host app)
+    delete GameEngine::Instance->gHMAS;
+    GameEngine::Instance->gHMAS = nullptr;
 #ifdef __SWITCH__
     Ship::Switch::Exit();
 #endif
