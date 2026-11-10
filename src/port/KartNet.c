@@ -1262,6 +1262,17 @@ void KartNet_SetPaused(int paused) {
     }
 }
 
+/* The host app (i64) paused or resumed the game on both machines: both say
+ * "paused" meanwhile (neither gives up on the other's silence); on resume only
+ * the side whose player paused presses Start (a race opens its pause menu,
+ * the menus just carry on). */
+void KartNet_HostPause(int paused, int initiator) {
+    KartNet_SetPaused(paused);
+    if (!paused && !initiator) {
+        sInjectStart = 0;
+    }
+}
+
 int KartNet_IsActive(void) {
     if (!sInitDone) {
         Init();

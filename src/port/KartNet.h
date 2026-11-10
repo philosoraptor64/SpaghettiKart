@@ -54,6 +54,7 @@ int KartNet_IsActive(void);
 /* The app is going to / coming back from the background (iOS): tells the peer
  * to wait instead of timing out. */
 void KartNet_SetPaused(int paused);
+void KartNet_HostPause(int paused, int initiator); /* i64 pause: both sides away; Start only for the initiator */
 /* Netplay view: each device shows only its own player, full screen
  * (MK64_NET_VIEW=full, the default; =split keeps the split screen).
  * main.c draws the split views as usual (they update per-screen state that
