@@ -211,9 +211,16 @@ typedef enum n64_frame_result {
  * again next frame. */
 N64_GAME_EXPORT n64_frame_result n64_game_frame(void);
 
-/* The app goes to the background / comes back (i64 owns the scene lifecycle;
- * the module stops rendering while paused; online it tells the peer). */
+/* i64 keeps the game while its players are in i64's menu: 1 = this player
+ * went back to i64, 2 = the friend did, 0 = back into the game. Online, both
+ * sides tell each other (no one gives up on the silence meanwhile). */
 N64_GAME_EXPORT void n64_game_set_paused(int paused);
+
+/* Optional. After set_paused(1 or 2), i64 keeps calling frame() until this
+ * returns 1 (at most ~1.5 s), then stops: a game can use those frames to open
+ * its own pause menu, so it is already paused when the players come back.
+ * Without it, i64 stops calling frame() at once. */
+N64_GAME_EXPORT int n64_game_pause_ready(void);
 
 /* Back to a clean slate: join threads, free game heaps, restore globals, flush
  * saves, release the renderer (not the window; on iOS also remove the Metal

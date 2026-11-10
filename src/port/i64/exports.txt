@@ -4,4 +4,5 @@ _n64_game_session_blob
 _n64_game_start
 _n64_game_frame
 _n64_game_set_paused
+_n64_game_pause_ready
 _n64_game_stop

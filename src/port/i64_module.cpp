@@ -365,6 +365,12 @@ extern "C" N64_GAME_EXPORT n64_frame_result n64_game_frame(void) {
     return Port_RunFrame() ? N64_GAME_FRAME_CONTINUE : N64_GAME_FRAME_EXIT;
 }
 
+extern "C" {
+extern int32_t gGamestate;     /* main.c */
+extern uint16_t gIsGamePaused; /* code_800029B0.c */
+}
+constexpr int32_t kGamestateRacing = 4; /* RACING, include/defines.h */
+
 /* i64 keeps the game while its players are in i64's menu: 1 = this player
  * paused, 2 = the friend did, 0 = back into the game (KartNet_HostPause). */
 extern "C" N64_GAME_EXPORT void n64_game_set_paused(int paused) {
@@ -379,6 +385,15 @@ extern "C" N64_GAME_EXPORT void n64_game_set_paused(int paused) {
         KartNet_HostPause(0, pausedBy == 1);
         pausedBy = 0;
     }
+}
+
+/* Ready to be frozen: not in a race that is still running (a race first
+ * opens its pause menu, from the Start pressed by KartNet_HostPause). */
+extern "C" N64_GAME_EXPORT int n64_game_pause_ready(void) {
+    if (!sRunning || !sOnline) {
+        return 1;
+    }
+    return (gGamestate == kGamestateRacing && gIsGamePaused == 0) ? 0 : 1;
 }
 
 extern "C" N64_GAME_EXPORT void n64_game_stop(void) {

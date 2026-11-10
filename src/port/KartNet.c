@@ -1263,13 +1263,19 @@ void KartNet_SetPaused(int paused) {
 }
 
 /* The host app (i64) paused or resumed the game on both machines: both say
- * "paused" meanwhile (neither gives up on the other's silence); on resume only
- * the side whose player paused presses Start (a race opens its pause menu,
- * the menus just carry on). */
+ * "paused" meanwhile (neither gives up on the other's silence). The side whose
+ * player paused presses Start when the pause begins: in a race that opens the
+ * game's pause menu (i64 waits for it, n64_game_pause_ready), so coming back
+ * is instant; in menus nothing is pressed and the game just carries on. */
 void KartNet_HostPause(int paused, int initiator) {
     KartNet_SetPaused(paused);
-    if (!paused && !initiator) {
-        sInjectStart = 0;
+    if (paused && initiator && sState == NET_RUNNING) {
+        /* press Start now (a normal input, so both games open the pause menu
+         * on the same tick); i64 keeps running frames until it is open */
+        sInjectStart = 1;
+    }
+    if (!paused) {
+        sInjectStart = 0; /* already in the pause menu (or in a menu): nothing to press */
     }
 }
 
