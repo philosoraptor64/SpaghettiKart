@@ -35,7 +35,13 @@
 
 namespace {
 
-constexpr size_t kReserve = (size_t) 1 << 30; /* 1 GB of address space; only touched pages cost memory */
+/* Address space for the simulation's C++ objects; only touched pages cost memory. A race uses a few MB (see
+ * the "SimHeap: released" line); inside i64 the block comes from i64's game memory arena
+ * (i64 docs/game-memory-arena.md), standalone from mmap. MK64_SIMHEAP_MB overrides. */
+constexpr size_t kDefaultReserve = (size_t) 128 << 20;
+size_t kReserve = kDefaultReserve;
+bool sFromArena = false;
+size_t sHighWater = 0;
 constexpr int kClasses = 30;                  /* block sizes 16 << k */
 constexpr uint32_t kMagic = 0x53494D48;       /* 'SIMH' */
 
@@ -89,6 +95,7 @@ void* HeapAlloc(size_t n) {
     } else {
         size_t size = (size_t) 16 << k;
         if (h->cursor + size > kReserve) {
+            fprintf(stderr, "SimHeap: full (%zu MB): raise kDefaultReserve or MK64_SIMHEAP_MB\n", kReserve >> 20);
             return nullptr;
         }
         uint8_t* block = sBase + h->cursor;
@@ -302,6 +309,8 @@ void operator delete[](void* p, size_t, std::align_val_t) noexcept {
 
 extern "C" {
 
+uint64_t (*SimHeap_HostArenaReserve)(uint64_t size, uint64_t align) = nullptr;
+
 /* libultraship's resource manager suspends the scope while it runs. */
 extern int (*LUS_AllocScopeSuspend)(void);
 extern void (*LUS_AllocScopeResume)(int);
@@ -310,7 +319,26 @@ int SimHeap_Enable(void) {
     if (sEnabled) {
         return 1;
     }
-    void* p = mmap(nullptr, kReserve, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    kReserve = kDefaultReserve;
+    if (const char* mb = getenv("MK64_SIMHEAP_MB")) {
+        if (atoi(mb) > 0) {
+            kReserve = (size_t) atoi(mb) << 20;
+        }
+    }
+    void* p = MAP_FAILED;
+    sFromArena = false;
+    if (SimHeap_HostArenaReserve) {
+        uint64_t a = SimHeap_HostArenaReserve(kReserve, 0);
+        if (a && mprotect((void*) (uintptr_t) a, kReserve, PROT_READ | PROT_WRITE) == 0) {
+            p = (void*) (uintptr_t) a;
+            sFromArena = true;
+        } else {
+            fprintf(stderr, "SimHeap: i64's arena has no %zu MB left, using mmap\n", kReserve >> 20);
+        }
+    }
+    if (p == MAP_FAILED) {
+        p = mmap(nullptr, kReserve, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    }
     if (p == MAP_FAILED) {
         fprintf(stderr, "SimHeap: cannot reserve %zu MB\n", kReserve >> 20);
         return 0;
@@ -323,7 +351,7 @@ int SimHeap_Enable(void) {
     LUS_AllocScopeSuspend = SimHeap_Suspend;
     LUS_AllocScopeResume = SimHeap_Resume;
     sEnabled = true;
-    fprintf(stderr, "SimHeap: enabled at %p\n", p);
+    fprintf(stderr, "SimHeap: enabled at %p (%zu MB, %s)\n", p, kReserve >> 20, sFromArena ? "i64 arena" : "mmap");
     return 1;
 }
 
@@ -361,7 +389,13 @@ void SimHeap_ReleaseForReentry(void) {
     if (!sBase) {
         return;
     }
-    munmap(sBase, kReserve);
+    fprintf(stderr, "SimHeap: released, %.1f MB used of %zu MB\n", H()->cursor / 1048576.0, kReserve >> 20);
+    if (sFromArena) {
+        /* i64 wipes its arena after the game stops; until then keep the range reserved (no hole to fill) */
+        mmap(sBase, kReserve, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+    } else {
+        munmap(sBase, kReserve);
+    }
     sBase = nullptr;
     sEnabled = false;
     LUS_AllocScopeSuspend = nullptr;

@@ -2,6 +2,7 @@
 #define MK_SIM_HEAP_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -21,6 +22,8 @@ int SimHeap_InScope(void);
 void* SimHeap_Base(void);
 int SimHeap_BlockOf(const void* p, void** payload, size_t* size); /* diagnostics */
 size_t SimHeap_Used(void); /* bytes from the base that a snapshot must copy */
+/* i64 module: n64_host.arena_reserve (set before start; NULL = mmap) */
+extern uint64_t (*SimHeap_HostArenaReserve)(uint64_t size, uint64_t align);
 void SimHeap_Stats(size_t* liveBlocks, size_t* liveBytes, size_t* used, size_t* deferredFrees, size_t* alignedFallbacks);
 
 #ifdef __cplusplus

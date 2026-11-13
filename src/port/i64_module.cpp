@@ -305,6 +305,7 @@ extern "C" N64_GAME_EXPORT int n64_game_start(const n64_host* host, const n64_la
     Reentry_SavePristine();
 
     sHost = host;
+    SimHeap_HostArenaReserve = host->arena_reserve;   /* (NULL in an older i64) */
     if (host->data_dir != nullptr && host->data_dir[0] != '\0') {
         SetEnv("SHIP_HOME", host->data_dir); /* config, saves, logs, mk64.o2r, spaghetti.o2r */
     }
