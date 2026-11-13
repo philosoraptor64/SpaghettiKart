@@ -29,6 +29,7 @@
 
 #include "Reentry.h"
 #include "SimHeap.h"
+#include <atomic>
 #include "Rollback.h"
 #include "kartnet_build_id.h"
 #include "mk64_asset_recipe.h"
@@ -94,6 +95,11 @@ const n64_game_info kInfo = {
 /* Survive the reset of the globals between runs (Reentry.cpp). */
 #define KEEP __attribute__((section("__DATA,__mkkeep")))
 KEEP const n64_host* sHost = nullptr;
+/* libultraship gfx_metal.cpp: one picture of the screen for i64's home screen */
+extern "C" void (*gLusFrameCaptureCallback)(const uint8_t* rgba, uint32_t w, uint32_t h);
+extern "C" std::atomic<int> gLusFrameCaptureRequest;
+static unsigned sRunFrames = 0;
+static constexpr unsigned kPreviewFirst = 1800, kPreviewEvery = 3600; /* 30 s in, then each minute (60 host frames/s) */
 KEEP bool sRunning = false;
 KEEP void* sRenderer = nullptr; /* SDL renderer on the host's window, reused across runs */
 KEEP void* sRendererWindow = nullptr;
@@ -305,6 +311,8 @@ extern "C" N64_GAME_EXPORT int n64_game_start(const n64_host* host, const n64_la
     Reentry_SavePristine();
 
     sHost = host;
+    sRunFrames = 0;
+    gLusFrameCaptureCallback = host->offer_title_art;
     SimHeap_HostArenaReserve = host->arena_reserve;   /* (NULL in an older i64) */
     if (host->data_dir != nullptr && host->data_dir[0] != '\0') {
         SetEnv("SHIP_HOME", host->data_dir); /* config, saves, logs, mk64.o2r, spaghetti.o2r */
@@ -374,6 +382,9 @@ extern "C" N64_GAME_EXPORT n64_frame_result n64_game_frame(void) {
     const uint64_t nowMs = (uint64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
                                std::chrono::steady_clock::now().time_since_epoch()).count();
     sHostFrames++;
+    if (++sRunFrames >= kPreviewFirst && (sRunFrames - kPreviewFirst) % kPreviewEvery == 0 && sHost && sHost->offer_title_art) {
+        gLusFrameCaptureRequest = 1; /* a picture for i64's home screen (libultraship gfx_metal.cpp) */
+    }
     if (nowMs >= sStatsAt) {
         if (sStatsAt && sHost && sHost->log) {
             sHost->log("mk64: %u host frames, %u logic ticks in the last 5 s", sHostFrames, sLogicTicks);
@@ -431,6 +442,8 @@ extern "C" N64_GAME_EXPORT void n64_game_stop(void) {
     if (!sRunning) {
         return;
     }
+    gLusFrameCaptureCallback = nullptr;
+    gLusFrameCaptureRequest = 0;
     KartNet_Shutdown();
     Port_RunEnd(1);
     Rollback_ReleaseForReentry();
