@@ -95,6 +95,7 @@ const n64_game_info kInfo = {
 /* Survive the reset of the globals between runs (Reentry.cpp). */
 #define KEEP __attribute__((section("__DATA,__mkkeep")))
 KEEP const n64_host* sHost = nullptr;
+extern "C" bool gLusHostPaced; /* libultraship gfx_sdl2.cpp */
 /* libultraship gfx_metal.cpp: one picture of the screen for i64's home screen */
 extern "C" void (*gLusFrameCaptureCallback)(const uint8_t* rgba, uint32_t w, uint32_t h);
 extern "C" std::atomic<int> gLusFrameCaptureRequest;
@@ -323,6 +324,7 @@ extern "C" N64_GAME_EXPORT int n64_game_start(const n64_host* host, const n64_la
     Reentry_SavePristine();
 
     sHost = host;
+    gLusHostPaced = (launch->flags & N64_LAUNCH_HOST_PACED) != 0; /* libultraship: i64 paces the frames */
     sRunFrames = 0;
     gLusFrameCaptureCallback = host->offer_title_art;
     SimHeap_HostArenaReserve = host->arena_reserve;   /* (NULL in an older i64) */
