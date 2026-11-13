@@ -100,6 +100,18 @@ extern "C" void (*gLusFrameCaptureCallback)(const uint8_t* rgba, uint32_t w, uin
 extern "C" std::atomic<int> gLusFrameCaptureRequest;
 static unsigned sRunFrames = 0;
 static constexpr unsigned kPreviewFirst = 1800, kPreviewEvery = 3600; /* 30 s in, then each minute (60 host frames/s) */
+
+/* when to offer a picture: kPreviewFirst, then every kPreviewEvery frames; tests: I64_TEST_PREVIEW_AT="400,700" */
+static bool PreviewDue(unsigned frame) {
+    static const char* at = getenv("I64_TEST_PREVIEW_AT");
+    if (at) {
+        for (const char* p = at; p && *p; p = strchr(p, ',') ? strchr(p, ',') + 1 : nullptr) {
+            if ((unsigned) atoi(p) == frame) return true;
+        }
+        return false;
+    }
+    return frame >= kPreviewFirst && (frame - kPreviewFirst) % kPreviewEvery == 0;
+}
 KEEP bool sRunning = false;
 KEEP void* sRenderer = nullptr; /* SDL renderer on the host's window, reused across runs */
 KEEP void* sRendererWindow = nullptr;
@@ -382,7 +394,8 @@ extern "C" N64_GAME_EXPORT n64_frame_result n64_game_frame(void) {
     const uint64_t nowMs = (uint64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
                                std::chrono::steady_clock::now().time_since_epoch()).count();
     sHostFrames++;
-    if (++sRunFrames >= kPreviewFirst && (sRunFrames - kPreviewFirst) % kPreviewEvery == 0 && sHost && sHost->offer_title_art) {
+    ++sRunFrames;
+    if (PreviewDue(sRunFrames) && sHost && sHost->offer_title_art) {
         gLusFrameCaptureRequest = 1; /* a picture for i64's home screen (libultraship gfx_metal.cpp) */
     }
     if (nowMs >= sStatsAt) {
