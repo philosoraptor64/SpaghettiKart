@@ -79,6 +79,8 @@ void KartNet_UiSetVoice(int mode);         /* 0 off, 1 open mic, 2 push-to-talk 
 int KartNet_ScreenIndex(int slot);
 /* Online session (MK64_NET_SESSION): both games run as one console. */
 int KartNet_NetDone(void);
+/* inside i64: why this side ends the run (a desync, the friend gone); "" = it doesn't */
+const char* KartNet_EndReason(void);
 void KartNet_Shutdown(void);
 int KartNet_InSession(void);
 /* Fewest players the main menu offers: everyone in an online session, else 1. */

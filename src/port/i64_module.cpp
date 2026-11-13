@@ -64,6 +64,7 @@ extern int (*gKartNetHostSend)(const void* data, uint32_t size);
 extern int (*gKartNetHostRecv)(void* buf, uint32_t cap);
 extern int (*gKartNetHostPeerLeft)(void);
 int KartNet_NetDone(void);
+const char* KartNet_EndReason(void);
 void KartNet_Shutdown(void);
 void KartNet_HostPause(int paused, int initiator);
 /* SimHeap.cpp: the game's allocator, for the host's operator new */
@@ -362,8 +363,8 @@ extern "C" N64_GAME_EXPORT n64_frame_result n64_game_frame(void) {
         return N64_GAME_FRAME_EXIT;
     }
     if (sOnline) {
-        if (PollPeerLeft() || KartNet_NetDone()) {
-            return N64_GAME_FRAME_EXIT; /* the other player left: back to i64 */
+        if (PollPeerLeft() || KartNet_NetDone() || KartNet_EndReason()[0]) {
+            return N64_GAME_FRAME_EXIT; /* the other player left, a desync...: back to i64 (exit message) */
         }
     }
     // speed check: host frames vs logic ticks (MK's logic is 30 Hz), every 5 s in i64.log
@@ -411,6 +412,11 @@ extern "C" N64_GAME_EXPORT void n64_game_set_paused(int paused) {
 
 /* Ready to be frozen: not in a race that is still running (a race first
  * opens its pause menu, from the Start pressed by KartNet_HostPause). */
+/* why frame() ended the game, for i64's menu ("" = the player quit) */
+extern "C" N64_GAME_EXPORT void n64_game_exit_message(char* out, size_t cap) {
+    std::snprintf(out, cap, "%s", sOnline ? KartNet_EndReason() : "");
+}
+
 extern "C" N64_GAME_EXPORT int n64_game_pause_ready(void) {
     if (!sRunning || !sOnline) {
         return 1;

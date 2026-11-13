@@ -320,6 +320,16 @@ static const u8 kMagic[4] = { 'M', 'K', 'N', '1' };
  * no address: the host's session already connects the two players). Set by
  * src/port/i64_module.cpp for an online run. */
 int (*gKartNetHostSend)(const void* data, uint32_t size) = NULL;
+/* inside i64: why this side ends the run ("" = it doesn't); the module returns EXIT and i64 shows it */
+static char sEndReason[200];
+static void SetEnd(const char* why) {
+    if (gKartNetHostSend != NULL && !sEndReason[0]) {
+        snprintf(sEndReason, sizeof(sEndReason), "%s", why);
+    }
+}
+const char* KartNet_EndReason(void) {
+    return sEndReason;
+}
 int (*gKartNetHostRecv)(void* buf, uint32_t cap) = NULL;
 /* i64 module: the host says the other player left the game or the session
  * (checked in every blocking wait, so a wait never outlives the friend). */
@@ -496,6 +506,7 @@ static void HandlePacket(const u8* buf, size_t len, const struct sockaddr_in* fr
             if (sState == NET_HANDSHAKE || sState == NET_RUNNING) {
                 Log("the other player left the session");
                 SetWait(6, "The other player left");
+                SetEnd("Your friend left the game.");
                 sState = NET_DONE;
             }
             break;
@@ -1355,12 +1366,14 @@ void KartNet_BeginFrame(void) {
         double now = NowMs();
         if (HostPeerGone()) {
             Log("the other player left before the game started");
+            SetEnd("Your friend left the game.");
             sState = NET_DONE;
             break;
         }
         if ((sFromUi || gKartNetHostSend != NULL) && now - handshakeStart > 30000) {
             Log("no answer from the other player; giving up");
             SetWait(6, "Your friend's game didn't answer");
+            SetEnd("Your friend's game didn't answer.");
             sState = NET_DONE;
             break;
         }
@@ -1859,6 +1872,7 @@ static void RecordConfirmedHashes(void) {
     if (!sDesyncLogged && n64net_sync_desynced(sNet, &dt, &kind)) {
         sDesyncLogged = 1;
         Log("DESYNC tick %u (%s)", dt, sRollback ? "rollback" : "lockstep");
+        SetEnd("The two games got out of step, so the match was stopped. (Both logs have the details.)");
         WriteDesyncDetail(dt);
         if (sRec) {
             fprintf(sRec, "# desync at tick %u\n", dt);
@@ -1957,6 +1971,7 @@ static void NetFrame(const NetPad* local) {
                 (silentMs == 0 && now - start > WaitTimeoutMs())) {
                 Log("peer silent at tick %lu; netplay stopped", sTick);
                 SetWait(8, "Lost the connection to the other player");
+                SetEnd("Lost the connection to your friend, so the match was stopped.");
                 sState = NET_DONE;
                 return;
             }
