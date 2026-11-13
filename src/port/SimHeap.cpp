@@ -33,6 +33,8 @@
 #include <new>
 #include <sys/mman.h>
 
+#include "i64/n64_bigblock.h"
+
 namespace {
 
 /* Address space for the simulation's C++ objects; only touched pages cost memory. A race uses a few MB (see
@@ -186,7 +188,10 @@ inline void* NewImpl(size_t n) {
         fprintf(stderr, "SimHeap: out of space (%zu bytes)\n", n);
         abort();
     }
-    void* p = malloc(n ? n : 1);
+    void* p = n64_big_alloc(n); /* big blocks go back to the system when freed (n64_bigblock.h) */
+    if (!p) {
+        p = malloc(n ? n : 1);
+    }
     if (!p) {
         throw std::bad_alloc();
     }
@@ -209,7 +214,9 @@ inline void DeleteImpl(void* p) {
         sOutsideFreesDeferred++; /* see the header comment: leak, don't free */
         return;
     }
-    free(p);
+    if (!n64_big_free(p)) {
+        free(p);
+    }
 }
 
 inline void* NewAligned(size_t n, std::align_val_t al) {
