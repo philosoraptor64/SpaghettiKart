@@ -24,6 +24,7 @@
 #if defined(SPAGHETTIKART_I64_MODULE)
 
 #define N64_GAME_BUILDING_MODULE 1
+#include <chrono>
 #include "i64/n64_game.h"
 
 #include "Reentry.h"
@@ -53,6 +54,8 @@ void Port_RunEnd(int fullShutdown);
 void Port_RequestStop(void);
 void LUS_SetExternalWindow(void* sdlWindow, void** rendererCache);
 void LUS_SetExternalPacing(bool hostPaced);
+void GameEngine_SetOnePicturePerHostFrame(bool on);   // Engine.cpp
+int GameEngine_HostFrameWithoutLogic(void);
 /* Game audio goes to the host (Engine.cpp AudioOutPlay). */
 extern void (*gPortHostAudioWrite)(const int16_t* stereo, uint32_t frames, uint32_t rate);
 extern uint32_t (*gPortHostAudioBuffered)(uint32_t rate);
@@ -83,7 +86,7 @@ const n64_game_info kInfo = {
     1,
     KARTNET_BUILD_ID,
     2,
-    30, /* gInterpolationFPS's default */
+    60, /* host frames/s: the 30 Hz logic plus one interpolated picture between ticks (Engine.cpp) */
     0,
 };
 
@@ -345,6 +348,7 @@ extern "C" N64_GAME_EXPORT int n64_game_start(const n64_host* host, const n64_la
     }
     LUS_SetExternalWindow(host->window, &sRenderer);
     LUS_SetExternalPacing((launch->flags & N64_LAUNCH_HOST_PACED) != 0);
+    GameEngine_SetOnePicturePerHostFrame((launch->flags & N64_LAUNCH_HOST_PACED) != 0);
     gPortHostAudioWrite = host->audio_write;
     gPortHostAudioBuffered = host->audio_buffered;
 
@@ -362,6 +366,24 @@ extern "C" N64_GAME_EXPORT n64_frame_result n64_game_frame(void) {
             return N64_GAME_FRAME_EXIT; /* the other player left: back to i64 */
         }
     }
+    // speed check: host frames vs logic ticks (MK's logic is 30 Hz), every 5 s in i64.log
+    static uint64_t sStatsAt = 0;
+    static unsigned sHostFrames = 0, sLogicTicks = 0;
+    const uint64_t nowMs = (uint64_t) std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch()).count();
+    sHostFrames++;
+    if (nowMs >= sStatsAt) {
+        if (sStatsAt && sHost && sHost->log) {
+            sHost->log("mk64: %u host frames, %u logic ticks in the last 5 s", sHostFrames, sLogicTicks);
+        }
+        sHostFrames = sLogicTicks = 0;
+        sStatsAt = nowMs + 5000;
+    }
+    // the host frame between two logic ticks: the interpolated picture
+    if (GameEngine_HostFrameWithoutLogic()) {
+        return N64_GAME_FRAME_CONTINUE;
+    }
+    sLogicTicks++;
     return Port_RunFrame() ? N64_GAME_FRAME_CONTINUE : N64_GAME_FRAME_EXIT;
 }
 
@@ -417,6 +439,7 @@ extern "C" N64_GAME_EXPORT void n64_game_stop(void) {
     sOnline = false;
     LUS_SetExternalWindow(nullptr, nullptr);
     LUS_SetExternalPacing(false);
+    GameEngine_SetOnePicturePerHostFrame(false);
     SimHeap_ReleaseForReentry();
     Reentry_RestorePristine();
     sRunning = false;

@@ -298,7 +298,43 @@ bool GameEngine::GenAssetFile() {
     return extractor->GenerateOTR();
 }
 
+// i64 (host-paced at 60 Hz): one picture per host frame. The logic runs every 2 refreshes (30 Hz);
+// its tick draws the first picture and the next host frame the interpolated one in between
+// (GameEngine_HostFrameWithoutLogic), so i64 shows 60 pictures/s at the game's normal speed.
+static bool sOnePicturePerHostFrame = false;
+static Gfx* sPendingPool = nullptr;
+static std::vector<std::unordered_map<Mtx*, MtxF>> sPendingPictures;
+static size_t sPendingNext = 0;
+static int sHostFramesLeft = 0;
+
+extern "C" void GameEngine_SetOnePicturePerHostFrame(bool on) {
+    sOnePicturePerHostFrame = on;
+    sPendingPool = nullptr;
+    sPendingPictures.clear();
+    sPendingNext = 0;
+    sHostFramesLeft = 0;
+}
+
+extern "C" int GameEngine_HostFrameWithoutLogic(void) {
+    if (!sOnePicturePerHostFrame || sHostFramesLeft <= 0) {
+        return 0;
+    }
+    sHostFramesLeft--;
+    auto wnd = std::dynamic_pointer_cast<Fast::Fast3dWindow>(Ship::Context::GetRawInstance()->GetWindow());
+    if (wnd != nullptr && sPendingPool != nullptr && sPendingNext < sPendingPictures.size()) {
+        auto interpreter = wnd->GetInterpreterWeak().lock().get();
+        wnd->HandleEvents();
+        interpreter->mInterpolationIndex = (int) sPendingNext + 1;
+        wnd->DrawAndRunGraphicsCommands(sPendingPool, sPendingPictures[sPendingNext]);
+        sPendingNext++;
+    }
+    return 1;
+}
+
 uint32_t GameEngine::GetInterpolationFPS() {
+    if (sOnePicturePerHostFrame) {
+        return 60;   // i64 paces 60 host frames/s: two pictures per 30 Hz logic tick
+    }
     if (CVarGetInteger("gMatchRefreshRate", 0)) {
         return Ship::Context::GetRawInstance()->GetWindow()->GetCurrentRefreshRate();
 
@@ -422,9 +458,19 @@ void GameEngine::RunCommands(Gfx* pool, const std::vector<std::unordered_map<Mtx
 
     interpreter->mInterpolationIndex = 0;
 
-    for (const auto& mtxStack : mtx_replacements) {
-        wnd->DrawAndRunGraphicsCommands(pool, mtxStack);
-        interpreter->mInterpolationIndex++;
+    if (sOnePicturePerHostFrame) {
+        if (!mtx_replacements.empty()) {
+            wnd->DrawAndRunGraphicsCommands(pool, mtx_replacements[0]);
+        }
+        sPendingPool = pool;
+        sPendingPictures.assign(mtx_replacements.begin() + (mtx_replacements.empty() ? 0 : 1), mtx_replacements.end());
+        sPendingNext = 0;
+        sHostFramesLeft = 1;   // the logic is 2 refreshes per tick (gVIsPerFrame 2)
+    } else {
+        for (const auto& mtxStack : mtx_replacements) {
+            wnd->DrawAndRunGraphicsCommands(pool, mtxStack);
+            interpreter->mInterpolationIndex++;
+        }
     }
 
     bool curAltAssets = CVarGetInteger("gEnhancements.Mods.AlternateAssets", 0);
