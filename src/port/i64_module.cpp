@@ -396,6 +396,8 @@ extern "C" N64_GAME_EXPORT int n64_game_pause_ready(void) {
     return (gGamestate == kGamestateRacing && gIsGamePaused == 0) ? 0 : 1;
 }
 
+extern "C" void Editor_ReleaseForReentry(void);   // Game.cpp
+
 extern "C" N64_GAME_EXPORT void n64_game_stop(void) {
     if (!sRunning) {
         return;
@@ -403,6 +405,7 @@ extern "C" N64_GAME_EXPORT void n64_game_stop(void) {
     KartNet_Shutdown();
     Port_RunEnd(1);
     Rollback_ReleaseForReentry();
+    Editor_ReleaseForReentry();
     gPortHostAudioWrite = nullptr;
     gPortHostAudioBuffered = nullptr;
     gKartNetHostSend = nullptr;

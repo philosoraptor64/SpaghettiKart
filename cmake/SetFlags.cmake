@@ -55,7 +55,12 @@ else()
   target_compile_options(${PROJECT_NAME} PRIVATE
                          "$<$<COMPILE_LANGUAGE:C>:${C_FLAGS}>")
 
-  set(CXX_FLAGS -fpermissive -fomit-frame-pointer)
+  set(CXX_FLAGS -fpermissive)
+  # Apple's arm64 ABI expects frame pointers (crash reports, profilers and
+  # malloc stack traces walk them); keep them there
+  if(NOT APPLE)
+    list(APPEND CXX_FLAGS -fomit-frame-pointer)
+  endif()
   target_compile_options(${PROJECT_NAME} PRIVATE
                          "$<$<COMPILE_LANGUAGE:CXX>:${CXX_FLAGS}>")
 

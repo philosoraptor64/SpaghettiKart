@@ -817,6 +817,20 @@ void Editor_AddLight(s8* direction) {
     i += 1;
 }
 
+/* i64 re-entry (before Reentry_RestorePristine): the editor's objects and the gizmo's
+ * collision meshes, built at every start, would only be forgotten by the restore of
+ * the globals (~300 KB per run). */
+extern "C" void Editor_ReleaseForReentry(void) {
+    gEditor.ClearObjects();
+    gEditor.ClearMatrixPool();
+    auto& g = gEditor.eObjectPicker.eGizmo;
+    for (TrackEditor::GameObject* o : { &g.RedCollision, &g.GreenCollision, &g.BlueCollision, &g.RedRotateCollision,
+                                        &g.GreenRotateCollision, &g.BlueRotateCollision, &g.RedScaleCollision,
+                                        &g.GreenScaleCollision, &g.BlueScaleCollision }) {
+        decltype(o->Triangles)().swap(o->Triangles);
+    }
+}
+
 void Editor_ClearMatrix() {
     gEditor.ClearMatrixPool();
 }
@@ -1209,6 +1223,7 @@ extern "C"
             objc_autoreleasePoolPop(pool);
 #endif
             Rollback_ReleaseForReentry();
+            Editor_ReleaseForReentry();
             SimHeap_ReleaseForReentry();
             Reentry_RestorePristine();
         }
