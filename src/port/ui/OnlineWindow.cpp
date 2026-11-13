@@ -27,6 +27,10 @@ extern "C" {
 #include "port/KartNet.h"
 #include "main.h"
 #include "defines.h"
+#if defined(__APPLE__)
+#include <atomic>
+extern "C" std::atomic<int> gLusFrameCaptureRequest; /* libultraship gfx_metal.cpp: a picture for i64 is pending */
+#endif
 }
 
 namespace {
@@ -93,6 +97,11 @@ void DrawOpener(float scale) {
     if (sOpen || (gGamestate == RACING && !gDemoMode)) {
         return;
     }
+#if defined(__APPLE__)
+    if (gLusFrameCaptureRequest.load(std::memory_order_relaxed)) {
+        return; /* i64 is taking a picture of the game for its home screen: not of this button */
+    }
+#endif
     ImGuiViewport* vp = ImGui::GetMainViewport();
     const char* label = KartNet_UiPhase() == KARTNET_UI_IDLE ? "Online" : "Online...";
     ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + vp->Size.x - 8.0f * scale, vp->Pos.y + 8.0f * scale), ImGuiCond_Always,
