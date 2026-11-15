@@ -97,6 +97,7 @@ extern int gKartNetSkipFrame; /* held frame outside races: game_state_handler do
 void KartNet_SetLayout(int players, int machines, int localMachine, const int* machineOf, const int* padOf,
                        int dropoutMenu);
 int KartNet_NumMachines(void);
+int KartNet_SoundCamera(void); /* the one camera whose sounds play (netplay full-screen views), else -1 */
 int KartNet_MachineLeft(int m);
 int KartNet_Retire(int p, int cpu);
 /* Start of each race frame: deterministic "shell on screen" bits (netplay). */

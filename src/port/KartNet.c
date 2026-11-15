@@ -2475,7 +2475,53 @@ static void ProbeMaybeDump(void) {
 #endif
 }
 
+/* 3-4 player races online: every device draws the game's own 4-way split (drawing stays the same everywhere)
+ * but shows only its own players' quarters, zoomed to the window (libultraship gLusPresentRegion). One player:
+ * its quarter; two side by side or one above the other (a device's players are consecutive: 1+2, 3+4): that
+ * half; otherwise the whole split. */
+extern volatile float gLusPresentRegion[4];
+static int sZoomPlayer = -1; /* the one local player whose quarter is shown, else -1 */
+static void UpdatePresentRegion(void) {
+    float r[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+    sZoomPlayer = -1;
+    if (sState == NET_RUNNING && sRaceRequested && sFullView && sLayoutSet && gGamestate == RACING &&
+        gActiveScreenMode == SCREEN_MODE_3P_4P_SPLITSCREEN && sLocalMask != 0) {
+        int c0 = 2, c1 = -1, r0 = 2, r1 = -1, n = 0;
+        for (int p = 0; p < 4; p++) {
+            if (sLocalMask & (1u << p)) {
+                const int c = p & 1, w = p >> 1;
+                c0 = c < c0 ? c : c0;
+                c1 = c > c1 ? c : c1;
+                r0 = w < r0 ? w : r0;
+                r1 = w > r1 ? w : r1;
+                n++;
+            }
+        }
+        if (n == (c1 - c0 + 1) * (r1 - r0 + 1) && n < 4) {
+            r[0] = c0 * 0.5f;
+            r[1] = r0 * 0.5f;
+            r[2] = (c1 + 1) * 0.5f;
+            r[3] = (r1 + 1) * 0.5f;
+            if (n == 1) {
+                sZoomPlayer = sLocalPlayer;
+            }
+        }
+    }
+    for (int i = 0; i < 4; i++) {
+        gLusPresentRegion[i] = r[i];
+    }
+}
+
+/* Sounds of only this player's camera, panned like 1P (one local player shown full screen), else -1. */
+int KartNet_SoundCamera(void) {
+    if (KartNet_WantsLocalView()) {
+        return sLocalPlayer;
+    }
+    return sZoomPlayer;
+}
+
 void KartNet_EndFrame(void) {
+    UpdatePresentRegion();
     if (sState != NET_RUNNING || !sRaceRequested) {
         return;
     }
