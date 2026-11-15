@@ -436,8 +436,14 @@ s32 is_cc_mode_complete(s32 cc_mode) {
     return false;
 }
 
+// i64's "everything unlocked" this run (src/port/i64_module.cpp): Extra (mirror) mode is open
+s32 gMk64UnlockAll = 0;
+
 // Check if the 150CC mode has all 4 gold cups
 s32 has_unlocked_extra_mode(void) {
+    if (gMk64UnlockAll) {
+        return true;
+    }
     return is_cc_mode_complete(CC_150);
 }
 

@@ -89,8 +89,11 @@ const n64_game_info kInfo = {
     KARTNET_BUILD_ID,
     2,
     60, /* host frames/s: the 30 Hz logic plus one interpolated picture between ticks (Engine.cpp) */
-    0,
+    N64_GAME_INFO_CAN_UNLOCK_ALL, /* "everything unlocked": Extra (mirror) mode */
 };
+
+extern "C" int gMk64UnlockAll;            /* src/save.c */
+extern "C" const char* gLusEepromFile;    /* libultraship os_eeprom.cpp */
 
 /* Survive the reset of the globals between runs (Reentry.cpp). */
 #define KEEP __attribute__((section("__DATA,__mkkeep")))
@@ -331,6 +334,10 @@ extern "C" N64_GAME_EXPORT int n64_game_start(const n64_host* host, const n64_la
     if (host->data_dir != nullptr && host->data_dir[0] != '\0') {
         SetEnv("SHIP_HOME", host->data_dir); /* config, saves, logs, mk64.o2r, spaghetti.o2r */
     }
+    /* "everything unlocked" (i64's choice; online the starter's, the same everywhere): Extra mode open, on a save of
+     * its own so its progress is kept and the normal save stays as it was */
+    gMk64UnlockAll = (launch->flags & N64_LAUNCH_UNLOCK_ALL) ? 1 : 0;
+    gLusEepromFile = gMk64UnlockAll ? "default-unlocked.sav" : "default.sav";
     /* netplay settings come from the environment: none from an earlier run */
     static const char* const kNetVars[] = { "MK64_NET", "MK64_NET_HOST", "MK64_NET_PEER", "MK64_NET_BIND",
                                             "MK64_NET_SERVER", "MK64_NET_ROOM", "MK64_NET_PASSWORD",
