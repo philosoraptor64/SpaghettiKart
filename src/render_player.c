@@ -133,7 +133,8 @@ u16 check_player_camera_collision(Player* player, Camera* camera, f32 arg2, f32 
             var_v0 = KartNet_WantsLocalView() ? 0x293C : 0x3058;
             break;
         case SCREEN_MODE_3P_4P_SPLITSCREEN:
-            var_v0 = 0x1FFE;
+            /* netplay views (KartNet_ViewLayout): culled like the layout drawn (1P, 2P halves, quarters) */
+            var_v0 = KartNet_ViewLayout() == 1 ? 0x293C : KartNet_ViewLayout() == 2 ? 0x3058 : 0x1FFE;
             break;
         default:
             if (1) {}

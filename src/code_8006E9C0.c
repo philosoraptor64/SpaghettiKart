@@ -226,12 +226,18 @@ void func_8006F008(void) {
             CM_GetProps()->Minimap.Pos[PLAYER_TWO].Y = 180;
             break;
         case 3:
+        case 4:
+            if (KartNet_ViewLayout() == 1) {
+                // netplay: each device shows one player full screen: keep the track's 1-player minimap place
+                break;
+            }
+            if (gPlayerCount == 4) {
+                CM_GetProps()->Minimap.Pos[PLAYER_ONE].X = 160;
+                CM_GetProps()->Minimap.Pos[PLAYER_ONE].Y = 120;
+                break;
+            }
             CM_GetProps()->Minimap.Pos[PLAYER_ONE].X = 235;
             CM_GetProps()->Minimap.Pos[PLAYER_ONE].Y = 175;
-            break;
-        case 4:
-            CM_GetProps()->Minimap.Pos[PLAYER_ONE].X = 160;
-            CM_GetProps()->Minimap.Pos[PLAYER_ONE].Y = 120;
             break;
     }
 }

@@ -803,6 +803,10 @@ void race_logic_loop(void) {
             }
             break;
         case SCREEN_MODE_3P_4P_SPLITSCREEN:
+            if (KartNet_ViewLayout()) {
+                KartNet_RenderViews(); // online: only this device's players, in their own layout
+                break;
+            }
             if (gPlayerWinningIndex == 0) {
                 render_screens(gScreenTwoCtx, RENDER_SCREEN_MODE_3P_4P_PLAYER_TWO, 9, 1);
                 render_screens(gScreenThreeCtx, RENDER_SCREEN_MODE_3P_4P_PLAYER_THREE, 10, 2);

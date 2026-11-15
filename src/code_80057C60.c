@@ -697,6 +697,55 @@ static void netplay_hud_pop(s32 playerId) {
     h->rankY = sNetHudSaved.rankY;
 }
 
+/* KartNet 3-4 player views (KartNet_ViewLayout): the race keeps its 3-4 player HUD state (positions from
+ * init_hud_three_four_player, item windows sliding in sideways); a device showing its player full screen (layout 1)
+ * or two players side by side (layout 2, slot 0/1) draws them at the 1-player / 2-player positions, keeping each
+ * element's own animation offset. */
+static const s16 sNet4pRankX[4] = { 0x25, 0x11A, 0x25, 0x11A }, sNet4pRankY[4] = { 0x64, 0x64, 0xD2, 0xD2 };
+static void netplay_hud_push_view(s32 p, s32 layout, s32 slot) {
+    hud_player* h = &playerHUD[p];
+    s32 i;
+    s16 slide = h->slideItemBoxX < 0 ? -h->slideItemBoxX : h->slideItemBoxX; /* 0..0x80 */
+    s16 timerX = layout == 1 ? 0xE4 : sNetHud2pTimerX[slot & 1];
+    sNetHudSaved = *h;
+    h->timerX = timerX;
+    for (i = 0; i < 3; i++) {
+        h->lapCompletionTimeXs[i] = timerX;
+    }
+    h->totalTimeX = timerX;
+    h->timerY = layout == 1 ? 0x11 : 0x10;
+    /* (the lap counter at its fixed 1P / 2P place: the 3-4 player one doesn't move like the 1P one) */
+    h->lapX = layout == 1 ? 0x53 : sNetHud2pLapX[slot & 1];
+    h->lapY = layout == 1 ? 0x19 : 0x28;
+    h->rankX = (layout == 1 ? 52 : sNetHud2pRankX[slot & 1]) + (h->rankX - sNet4pRankX[p]);
+    h->rankY = (layout == 1 ? 0xC8 : 0xD2) + (h->rankY - sNet4pRankY[p]);
+    if (layout == 1) { /* 1P: drops in from above by 0x40 */
+        h->itemBoxX = 0xA0 - h->slideItemBoxX;
+        h->itemBoxY = -0x20 + slide / 2 - h->slideItemBoxY;
+    } else { /* 2P halves: slides in sideways by 0x80 from the screen's edge */
+        h->itemBoxX = ((slot & 1) ? 0x43 : -0x52) + slide - h->slideItemBoxX;
+        h->itemBoxY = 0x32 - h->slideItemBoxY;
+    }
+}
+
+static void netplay_hud_pop(s32 playerId);
+static void render_hud_netplay_view(s32 p) {
+    const s32 layout = KartNet_ViewLayout();
+    if (gHUDDisable != 0) {
+        return;
+    }
+    FrameInterpolation_RecordOpenChild("HudMatrix", p);
+    set_matrix_hud_screen();
+    netplay_hud_push_view(p, layout, KartNet_ViewSlot(p));
+    if ((gModeSelection != BATTLE) && (gIsHUDVisible != 0)) {
+        render_hud_timer(p);
+        draw_simplified_lap_count(p);
+    }
+    draw_item_window(p);
+    netplay_hud_pop(p);
+    FrameInterpolation_RecordCloseChild();
+}
+
 static void render_hud_netplay_local(s32 playerId) {
     if (gHUDDisable != 0) {
         return;
@@ -760,28 +809,22 @@ void render_hud(u32 arg0) {
 
                 break;
             case RENDER_SCREEN_MODE_3P_4P_PLAYER_ONE:
-                if (!gDemoMode) {
-                    render_hud_1p_multi();
-                    break;
-                }
-
-                break;
             case RENDER_SCREEN_MODE_3P_4P_PLAYER_TWO:
-                if (!gDemoMode) {
-                    render_hud_2p_multi();
-                    break;
-                }
-
-                break;
             case RENDER_SCREEN_MODE_3P_4P_PLAYER_THREE:
-                if (!gDemoMode) {
-                    render_hud_3p_multi();
+            case RENDER_SCREEN_MODE_3P_4P_PLAYER_FOUR:
+                if (gDemoMode) {
                     break;
                 }
-
-                break;
-            case RENDER_SCREEN_MODE_3P_4P_PLAYER_FOUR:
-                if ((!gDemoMode) && (gPlayerCountSelection1 == 4)) {
+                if (KartNet_ViewLayout() == 1 || KartNet_ViewLayout() == 2) {
+                    // netplay: this device's player(s) at the 1P / 2P positions
+                    render_hud_netplay_view(arg0 - RENDER_SCREEN_MODE_3P_4P_PLAYER_ONE);
+                } else if (arg0 == RENDER_SCREEN_MODE_3P_4P_PLAYER_ONE) {
+                    render_hud_1p_multi();
+                } else if (arg0 == RENDER_SCREEN_MODE_3P_4P_PLAYER_TWO) {
+                    render_hud_2p_multi();
+                } else if (arg0 == RENDER_SCREEN_MODE_3P_4P_PLAYER_THREE) {
+                    render_hud_3p_multi();
+                } else if (gPlayerCountSelection1 == 4) {
                     render_hud_4p_multi();
                 }
                 break;
@@ -870,11 +913,29 @@ void func_800590D4(void) {
                     func_8004E800(PLAYER_TWO);
                     break;
                 case 3:
-                    func_8004E998(PLAYER_ONE);
-                    func_8004E998(PLAYER_TWO);
-                    func_8004E998(PLAYER_THREE);
-                    break;
                 case 4:
+                    if (KartNet_ViewLayout() != 0) {
+                        // netplay views: only this device's players; full screen / halves at the 1P / 2P place
+                        for (s32 p = 0; p < gPlayerCountSelection1; p++) {
+                            if (!KartNet_IsLocalPlayer(p)) {
+                                continue;
+                            }
+                            if (KartNet_ViewLayout() == 4) {
+                                func_8004E998(p);
+                                continue;
+                            }
+                            netplay_hud_push_view(p, KartNet_ViewLayout(), KartNet_ViewSlot(p));
+                            func_8004E800(p);
+                            netplay_hud_pop(p);
+                        }
+                        break;
+                    }
+                    if (gPlayerCountSelection1 == 3) {
+                        func_8004E998(PLAYER_ONE);
+                        func_8004E998(PLAYER_TWO);
+                        func_8004E998(PLAYER_THREE);
+                        break;
+                    }
                     func_8004E998(PLAYER_ONE);
                     func_8004E998(PLAYER_TWO);
                     func_8004E998(PLAYER_THREE);
@@ -898,7 +959,16 @@ void func_800591B4(void) {
                     func_800514BC();
                 }
                 if ((!gDemoMode) && (D_801657E8 != false)) {
-                    if (KartNet_WantsLocalView()) {
+                    if (KartNet_ViewLayout() != 0) {
+                        // netplay 3-4 player views: a full-screen view gets the track's 1-player minimap
+                        if (KartNet_ViewLayout() == 1) { // (the argument is the minimap's place: the 1P one)
+                            func_8004EE54(0);
+                            if (gModeSelection != BATTLE) {
+                                set_minimap_finishline_position(0);
+                            }
+                            func_8004F3E4(0);
+                        }
+                    } else if (KartNet_WantsLocalView()) {
                         // netplay full view: the local player's minimap (toggled by its own C-right)
                         s32 local = KartNet_LocalPlayer();
                         if (D_80165800[local] != 0) {

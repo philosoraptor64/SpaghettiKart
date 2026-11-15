@@ -1288,6 +1288,9 @@ void play_sound(u32 soundBits, Vec3f* position, u8 cameraId, f32* arg3, f32* arg
     if (KartNet_SoundCamera() >= 0 && cameraId != KartNet_SoundCamera()) {
         return; /* online: the other players' screens are on the other devices */
     }
+    if (KartNet_ViewLayout() && !KartNet_IsLocalPlayer(cameraId)) {
+        return;
+    }
     u8 bank;
     struct Sound* temp_v0;
 

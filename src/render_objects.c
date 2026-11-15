@@ -1619,7 +1619,9 @@ void render_texture_rectangle_wide(s32 x, s32 y, s32 width, s32 height, s32 arg4
 
     if (arg6 == 0) {
         // Netplay full view (KartNet): one player's HUD on the whole screen, laid out like 1P.
-        switch (KartNet_WantsLocalView() ? SCREEN_MODE_1P : gScreenModeSelection) {
+        switch ((KartNet_WantsLocalView() || KartNet_ViewLayout() == 1) ? SCREEN_MODE_1P
+                : KartNet_ViewLayout() == 2                               ? SCREEN_MODE_2P_SPLITSCREEN_VERTICAL
+                                                                          : gScreenModeSelection) {
             case SCREEN_MODE_1P:
             case SCREEN_MODE_3P_4P_SPLITSCREEN:
             case SCREEN_MODE_2P_SPLITSCREEN_HORIZONTAL:

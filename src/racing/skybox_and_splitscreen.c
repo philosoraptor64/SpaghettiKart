@@ -267,9 +267,10 @@ void func_802A4300(void) {
     if (gActiveScreenMode == SCREEN_MODE_1P) {
         return;
     }
-    if (KartNet_WantsLocalView()) {
+    if (KartNet_WantsLocalView() || KartNet_ViewLayout() == 1) {
         return; // netplay full-screen view: no split-screen divider
     }
+    s32 netHalves = KartNet_ViewLayout() == 2; // netplay: this device's two players side by side
     if (D_800DC5B0 != 0) {
         return;
     }
@@ -283,7 +284,7 @@ void func_802A4300(void) {
     gDPSetScissor(gDisplayListHead++, G_SC_NON_INTERLACE, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
     gDPPipeSync(gDisplayListHead++);
 
-    switch (gActiveScreenMode) {
+    switch (netHalves ? SCREEN_MODE_2P_SPLITSCREEN_VERTICAL : gActiveScreenMode) {
         case SCREEN_MODE_2P_SPLITSCREEN_VERTICAL:
             gDPFillRectangle(gDisplayListHead++, 157, 0, 159, 239);
             break;

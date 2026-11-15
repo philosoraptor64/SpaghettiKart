@@ -5,6 +5,8 @@
 #define KARTNET_IOS 1
 #endif
 #include "KartNet.h"
+void CVarSetInteger(const char* name, int value); /* libultraship */
+int CVarGetInteger(const char* name, int defaultValue);
 
 #include <errno.h>
 #include <math.h>
@@ -1845,7 +1847,9 @@ static void RecordTickHash(unsigned long tick) {
             if (f) {
                 uint32_t t32 = (uint32_t) tick;
                 fwrite(&t32, 4, 1, f);
-                fwrite(sHashCopy, sizeof(sHashCopy), 1, f);
+                /* MK64_NET_REC_DUMP_RAW=1: gPlayers as they are (drawing fields included) */
+                fwrite(EnvInt("MK64_NET_REC_DUMP_RAW", 0) ? (const void*) gPlayers : (const void*) sHashCopy,
+                       sizeof(sHashCopy), 1, f);
                 fclose(f);
             }
         }
@@ -2234,6 +2238,14 @@ void KartNet_OverrideInput(void) {
             pads[p].button = c->button;
             pads[p].x = c->stick_x;
             pads[p].y = c->stick_y;
+            if (sBot && p != sLocalPlayer) { /* tests: the bot plays them too (A through menus, drives in races) */
+                if (gGamestate == RACING && sRaceStartTick >= 0) {
+                    pads[p] = DriveInput(sTick + 97u * (unsigned long) p);
+                } else {
+                    NetPad a = { (u16) ((sTick + (unsigned long) p * 7) % 20 == 0 ? A_BUTTON : 0), 0, 0 };
+                    pads[p] = a;
+                }
+            }
         }
     }
     pads[sLocalPlayer & 3] = local;
@@ -2348,9 +2360,13 @@ static unsigned long long HashPlayers(unsigned long long h) {
  * devices (and re-simulated frames draw nothing). Recompute them at the start
  * of every race frame from both players' cameras, exactly as the drawing code
  * tests them, so they are the same everywhere. */
+void CM_VehicleSteerHints(void);
 void KartNet_UpdateShellVisibility(void) {
     if (!KartNet_IsActive()) {
         return;
+    }
+    if (gGamestate == RACING) {
+        CM_VehicleSteerHints(); /* the cars' lane hint for every player (their Draw did it per drawn screen) */
     }
     size_t n = CM_GetActorSize();
     for (size_t i = 0; i < n; i++) {
@@ -2416,7 +2432,7 @@ static void MaskDrawingFields(Player* players) {
 extern uintptr_t sPoolEnd;
 static void ProbeWrite(const char* dir, const char* name, const void* p, size_t n) {
     char path[1024];
-    snprintf(path, sizeof(path), "%s/%s-%s", dir, sIsHost ? "host" : "guest", name);
+    snprintf(path, sizeof(path), "%s/device%d-%s", dir, sLocalMachine + 1, name);
     FILE* f = fopen(path, "wb");
     if (f) {
         fwrite(p, 1, n, f);
@@ -2441,7 +2457,7 @@ static void ProbeMaybeDump(void) {
     const char* segs[] = { "__DATA", "__DATA", "__DATA", "__MKSNAP", "__MKSNAP" };
     FILE* idx;
     char path[1024];
-    snprintf(path, sizeof(path), "%s/%s-index%d.txt", dir, sIsHost ? "host" : "guest", which);
+    snprintf(path, sizeof(path), "%s/device%d-index%d.txt", dir, sLocalMachine + 1, which);
     idx = fopen(path, "w");
     uintptr_t poolStart = sPoolEnd - 0x10000000;
     for (int i = 0; i < 5; i++) {
@@ -2497,14 +2513,9 @@ static void UpdatePresentRegion(void) {
                 n++;
             }
         }
-        if (n == (c1 - c0 + 1) * (r1 - r0 + 1) && n < 4) {
-            r[0] = c0 * 0.5f;
-            r[1] = r0 * 0.5f;
-            r[2] = (c1 + 1) * 0.5f;
-            r[3] = (r1 + 1) * 0.5f;
-            if (n == 1) {
-                sZoomPlayer = sLocalPlayer;
-            }
+        /* (redrawn per device now, KartNet_RenderViews: nothing to crop) */
+        if (n == 1) {
+            sZoomPlayer = sLocalPlayer;
         }
     }
     for (int i = 0; i < 4; i++) {
@@ -2520,7 +2531,9 @@ int KartNet_SoundCamera(void) {
     return sZoomPlayer;
 }
 
+static void RestoreViewRects(void);
 void KartNet_EndFrame(void) {
+    RestoreViewRects();
     UpdatePresentRegion();
     if (sState != NET_RUNNING || !sRaceRequested) {
         return;
@@ -2655,8 +2668,155 @@ int KartNet_ScreenIndex(int slot) {
     return (sDrawingLocalView && slot == 3) ? sLocalPlayer : slot;
 }
 
+int KartNet_ViewLayout(void);
+void render_screens(ScreenContext* screen, s32 mode, s32 someId, s32 playerId);
 int KartNet_TransitionsInLogic(void) {
-    return KartNet_WantsLocalView();
+    return KartNet_WantsLocalView() || KartNet_ViewLayout() != 0;
+}
+
+/* 3-4 player races online (the owner's rule for split screens): every device draws only its own players, laid
+ * out as the game does for that many players on one console. 1 local player: its view redrawn full screen (1P
+ * size, culling, detail and HUD layout); 2: the game's 2-player split (left/right halves); 3: their quarters as in
+ * the 4-way split. The race itself stays a 3-4 player race on every device (drawing never feeds the simulation).
+ * Returns 0 (off), 1, 2 or 4 (the layout). The same "on" on every device (the fade logic depends on it). */
+int KartNet_ViewLayout(void) {
+    if (!(sState != NET_OFF && sRaceRequested && sFullView && sLayoutSet && gGamestate == RACING &&
+          gActiveScreenMode == SCREEN_MODE_3P_4P_SPLITSCREEN)) {
+        return 0;
+    }
+    const int k = __builtin_popcount(sLocalMask & ((1u << sSessionPlayers) - 1));
+    return k <= 1 ? 1 : k == 2 ? 2 : 4;
+}
+
+int KartNet_IsLocalPlayer(int p) {
+    return p >= 0 && p < 4 && (sLocalMask & (1u << p)) != 0;
+}
+
+extern s32 gNumScreens;
+void func_8009C918(void);
+struct ViewRect {
+    int p;
+    s16 w, h, x, y;
+};
+static struct ViewRect sViewSaved[4];
+static int sViewSavedCount = 0;
+static void DrawOthersSilently(s32 mode0, s32 someId0) {
+    /* The game's drawing feeds its logic in places: drawing an object for a screen marks it seen by that camera
+     * (func_8008A364 and friends), and some objects only act while seen. The console draws every screen, so here
+     * the other players' screens are still built, with only the parts that do that (C and C++ actors, objects,
+     * item boxes), into a display list that is thrown away: the GPU draws nothing, the bookkeeping matches the
+     * console on every device. (Found on Toad's Turnpike: without it a car hit kart 3 on one device only.)
+     * MK64_NET_DRAW_OTHERS=<mask> overrides the parts (1 track, 2 C actors, 4 C++ actors, 8 static meshes,
+     * 16 objects, 32 players, 64 transparent track, 128 particles, 256 item boxes; -1 = none). */
+    static long drawOthers = -2;
+    if (drawOthers == -2) {
+        drawOthers = EnvInt("MK64_NET_DRAW_OTHERS", 2 | 4 | 16 | 256);
+    }
+    if (drawOthers >= 0) {
+        static const char* const kParts[] = { "gDrawTrackGeometry", "gDrawCActors", "gDrawCPPActors",
+                                              "gDrawStaticMeshActors", "gDrawObjects", "gDrawPlayers",
+                                              "gDrawTransparentTrack", "gDrawParticles", "gDrawItemBoxes", "gDrawHUD" };
+        int was[10];
+        Gfx* head = gDisplayListHead;
+        for (int i = 0; i < 10; i++) {
+            was[i] = CVarGetInteger(kParts[i], 1);
+            CVarSetInteger(kParts[i], i < 9 && (drawOthers & (1L << i)) ? was[i] : 0);
+        }
+        for (int p = 0; p < sSessionPlayers && p < 4; p++) {
+            if (!(sLocalMask & (1u << p))) {
+                gNumScreens = 1;
+                render_screens(&gScreenContexts[p], mode0 + p, someId0 + p, p);
+            }
+        }
+        for (int i = 0; i < 10; i++) {
+            CVarSetInteger(kParts[i], was[i]);
+        }
+        gDisplayListHead = head;
+    }
+}
+
+/* main.c, instead of the 4-way split (KartNet_ViewLayout() != 0) */
+void KartNet_RenderViews(void) {
+    const int k = KartNet_ViewLayout();
+    int players[4], n = 0;
+    for (int p = 0; p < sSessionPlayers && p < 4; p++) {
+        if (sLocalMask & (1u << p)) {
+            players[n++] = p;
+        }
+    }
+    struct ViewRect* saved = sViewSaved;
+    sViewSavedCount = n;
+    for (int i = 0; i < n; i++) {
+        saved[i].p = players[i];
+        ScreenContext* c = &gScreenContexts[players[i]];
+        saved[i].w = c->screenWidth;
+        saved[i].h = c->screenHeight;
+        saved[i].x = c->screenStartX;
+        saved[i].y = c->screenStartY;
+        if (k == 1) {
+            c->screenWidth = SCREEN_WIDTH;
+            c->screenHeight = SCREEN_HEIGHT;
+            c->screenStartX = SCREEN_WIDTH / 2;
+            c->screenStartY = SCREEN_HEIGHT / 2;
+        } else if (k == 2) {
+            c->screenWidth = SCREEN_WIDTH / 2;
+            c->screenHeight = SCREEN_HEIGHT;
+            c->screenStartX = i == 0 ? SCREEN_WIDTH / 4 : SCREEN_WIDTH * 3 / 4;
+            c->screenStartY = SCREEN_HEIGHT / 2;
+        }
+    }
+    const f32 aspect = gScreenAspect;
+    s16 lod[5] = { D_80165570, D_80165574, D_80165578, D_8016557A, D_80165580 };
+    if (k == 1 && gModeSelection != BATTLE) { /* the 1-player kart detail and draw distances */
+        D_80165570 = 0x15E;
+        D_80165574 = 0x1F4;
+        D_80165578 = 0x4B0;
+        D_8016557A = -0xA;
+        D_80165580 = 0xFA;
+    }
+    DrawOthersSilently(RENDER_SCREEN_MODE_3P_4P_PLAYER_ONE, 8);
+    func_8009C918(); /* overlay boxes (fades, lightning) from these views */
+    for (int i = 0; i < n; i++) {
+        const int p = players[i];
+        /* the last view draws the full-screen overlays (pause menu, results), as the 4th screen does */
+        gNumScreens = (i == n - 1) ? 3 : i;
+        gScreenAspect = k == 1 ? (f32) SCREEN_WIDTH / (f32) SCREEN_HEIGHT : k == 2 ? 160.0f / 240.0f : aspect;
+        render_screens(&gScreenContexts[p], RENDER_SCREEN_MODE_3P_4P_PLAYER_ONE + p, 8 + p, p);
+    }
+    if (EnvInt("MK64_NET_VIEW_DEBUG", 0) && sTick % 300 == 0) {
+        ScreenContext* c = &gScreenContexts[players[0]];
+        Log("view debug tick %lu: k %d player %d rect %d,%d %dx%d vscale %d,%d vtrans %d,%d", sTick, k, players[0],
+            c->screenStartX, c->screenStartY, c->screenWidth, c->screenHeight, c->viewport.vp.vscale[0],
+            c->viewport.vp.vscale[1], c->viewport.vp.vtrans[0], c->viewport.vp.vtrans[1]);
+    }
+    gNumScreens = 4;
+    gScreenAspect = aspect;
+    D_80165570 = lod[0];
+    D_80165574 = lod[1];
+    D_80165578 = lod[2];
+    D_8016557A = lod[3];
+    D_80165580 = lod[4];
+    /* the screens keep their view rectangles until the frame is drawn (the HUD pass sets the viewport again from
+     * them, func_80057CE4): KartNet_EndFrame puts the race's own rectangles back before the next logic */
+}
+
+static void RestoreViewRects(void) {
+    for (int i = 0; i < sViewSavedCount; i++) {
+        ScreenContext* c = &gScreenContexts[sViewSaved[i].p];
+        c->screenWidth = sViewSaved[i].w;
+        c->screenHeight = sViewSaved[i].h;
+        c->screenStartX = sViewSaved[i].x;
+        c->screenStartY = sViewSaved[i].y;
+    }
+    sViewSavedCount = 0;
+}
+
+/* the slot of local player p in this device's layout (0..k-1), or -1 */
+int KartNet_ViewSlot(int p) {
+    if (!KartNet_IsLocalPlayer(p)) {
+        return -1;
+    }
+    return __builtin_popcount(sLocalMask & ((1u << p) - 1));
 }
 
 int KartNet_SkipSplitRender(void) {
@@ -2672,6 +2832,11 @@ void KartNet_RenderLocalView(void* splitStart) {
      * screen with the 1-player viewport and aspect ratio, and finally undo
      * everything that extra draw changed in gPlayers. */
     gDisplayListHead = (Gfx*) splitStart;
+    if (sSingleView) { /* the other player's screen only for the game's bookkeeping (see DrawOthersSilently) */
+        s32 numScreensBefore = gNumScreens;
+        DrawOthersSilently(RENDER_SCREEN_MODE_2P_VERTICAL_PLAYER_ONE, 1);
+        gNumScreens = numScreensBefore;
+    }
     memcpy(sRenderSnapshot, gPlayers, sizeof(sRenderSnapshot));
     s32 numScreens = gNumScreens;
 

@@ -162,22 +162,10 @@ void ACar::Tick60fps() {
 }
 
 void ACar::Draw(Camera* camera) {
-    s32 var_v0;
-    s32 var_s2;
-    s32 waypointCount;
-    u16 temp_a1;
-
-    waypointCount = gPathCountByPathIndex[0];
-    if (!(gPlayers[camera->playerId].speed < 1.6666666666666667)) {
-        temp_a1 = WaypointIndex;
-        for (var_v0 = 0; var_v0 < 0x18; var_v0 += 3) {
-            if (((sSomeNearestPathPoint + var_v0) % waypointCount) == temp_a1) {
-                gPlayerTrackPositionFactorInstruction[camera->playerId].target =
-                    player_track_position_factor_vehicle(SomeType, gTrackPositionFactor[camera->playerId], temp_a1);
-                return;
-            }
-        }
+    if (KartNet_IsActive()) {
+        return; // online: the race logic gives the hint for every player (CM_VehicleSteerHints)
     }
+    VehicleSteerHint(camera, WaypointIndex, SomeType);
 }
 
 void ACar::VehicleCollision(s32 playerId, Player* player) {
