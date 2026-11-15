@@ -7,3 +7,5 @@ _n64_game_set_paused
 _n64_game_pause_ready
 _n64_game_stop
 _n64_game_exit_message
+_n64_game_dropout
+_n64_game_cpu_options

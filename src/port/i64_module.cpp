@@ -65,6 +65,11 @@ extern int (*gKartNetHostSend)(const void* data, uint32_t size);
 extern int (*gKartNetHostRecv)(void* buf, uint32_t cap);
 extern int (*gKartNetHostPeerLeft)(void);
 int KartNet_NetDone(void);
+int KartNet_NumMachines(void);
+int KartNet_MachineLeft(int m);
+int KartNet_Retire(int p, int cpu);
+void KartNet_SetLayout(int players, int machines, int localMachine, const int* machineOf, const int* padOf,
+                       int dropoutMenu);
 const char* KartNet_EndReason(void);
 void KartNet_Shutdown(void);
 void KartNet_HostPause(int paused, int initiator);
@@ -87,9 +92,11 @@ const n64_game_info kInfo = {
     kRoms,
     1,
     KARTNET_BUILD_ID,
-    2,
+    4, /* 1-4 players: online up to 4 devices, each with any number of its controllers */
     60, /* host frames/s: the 30 Hz logic plus one interpolated picture between ticks (Engine.cpp) */
     N64_GAME_INFO_CAN_UNLOCK_ALL, /* "everything unlocked": Extra (mirror) mode */
+    N64_DROPOUT_CAN_CPU | N64_DROPOUT_CAN_IDLE, /* 3+ devices: the game's AI drives a leaver's kart, or it idles */
+    4,
 };
 
 extern "C" int gMk64UnlockAll;            /* src/save.c */
@@ -127,6 +134,18 @@ const n64_alloc_hooks kAllocHooks = { SimHeap_HookAlloc, SimHeap_HookAllocAligne
 
 /* the host's session events (also polled from KartNet's blocking waits) */
 int PollPeerLeft(void) {
+    if (sHost != nullptr && sHost->abi_version >= 2 && sHost->net_poll_event_from != nullptr &&
+        KartNet_NumMachines() > 2) {
+        /* 3+ devices: a guest leaving waits for the host's drop-out choice (KartNet_MachineLeft); the host leaving,
+         * or nobody to decide, ends the match */
+        uint32_t m = 0;
+        for (int e; (e = sHost->net_poll_event_from(&m)) != 0;) {
+            if (e == N64_NET_PEER_LEFT && (m == 0 || !KartNet_MachineLeft((int) m))) {
+                sPeerLeft = true;
+            }
+        }
+        return sPeerLeft ? 1 : 0;
+    }
     if (sHost != nullptr && sHost->net_poll_event != nullptr) {
         for (int e; (e = sHost->net_poll_event()) != 0;) {
             if (e == N64_NET_PEER_LEFT) {
@@ -285,9 +304,10 @@ extern "C" N64_GAME_EXPORT int n64_game_start(const n64_host* host, const n64_la
         std::snprintf(err, err_size, "i64 and this game module disagree on the interface version");
         return 1;
     }
-    if (launch->mode == N64_LAUNCH_ONLINE &&
-        (host->net_send == nullptr || host->net_recv == nullptr || launch->local_player > 1)) {
-        std::snprintf(err, err_size, "online needs i64's game channel and 2 players");
+    if (launch->mode == N64_LAUNCH_ONLINE && (host->net_send == nullptr || host->net_recv == nullptr ||
+                                              launch->player_count < 2 || launch->player_count > 4 ||
+                                              launch->num_machines < 2 || launch->num_machines > 4)) {
+        std::snprintf(err, err_size, "online needs i64's game channel and 2-4 players");
         return 1;
     }
     /* Game data: mk64.o2r is imported from the player's ROM (above);
@@ -351,7 +371,14 @@ extern "C" N64_GAME_EXPORT int n64_game_start(const n64_host* host, const n64_la
     sOnline = launch->mode == N64_LAUNCH_ONLINE;
     sPeerLeft = false;
     if (sOnline) {
-        const bool isHost = launch->local_player == 0;
+        const bool isHost = launch->local_machine == 0;
+        int machineOf[4] = { 0, 1, 2, 3 }, padOf[4] = { 0, 0, 0, 0 };
+        for (uint32_t p = 0; p < launch->player_count && p < 4; p++) {
+            machineOf[p] = launch->players[p].machine;
+            padOf[p] = launch->players[p].pad;
+        }
+        KartNet_SetLayout((int) launch->player_count, (int) launch->num_machines, (int) launch->local_machine,
+                          machineOf, padOf, (launch->flags & N64_LAUNCH_DROPOUT_MENU) != 0);
         SetEnv("MK64_NET", "1");
         SetEnv("MK64_NET_HOST", isHost ? "1" : "0");
         SetEnv("MK64_NET_SESSION", "1"); /* the whole game as one console */
@@ -360,8 +387,13 @@ extern "C" N64_GAME_EXPORT int n64_game_start(const n64_host* host, const n64_la
         }
         if (host->data_dir != nullptr && host->data_dir[0] != '\0') {
             /* sync log + per-race input/hash records (desync forensics) */
-            std::snprintf(sNetLog, sizeof(sNetLog), "%s/kartnet-%s-run%u.log", host->data_dir, isHost ? "host" : "guest",
-                          launch->run);
+            if (launch->num_machines > 2) {
+                std::snprintf(sNetLog, sizeof(sNetLog), "%s/kartnet-device%u-run%u.log", host->data_dir,
+                              launch->local_machine + 1, launch->run);
+            } else {
+                std::snprintf(sNetLog, sizeof(sNetLog), "%s/kartnet-%s-run%u.log", host->data_dir,
+                              isHost ? "host" : "guest", launch->run);
+            }
             SetEnv("MK64_NET_LOG", sNetLog);
         }
         gKartNetHostSend = host->net_send;
@@ -430,6 +462,26 @@ constexpr int32_t kGamestateRacing = 4; /* RACING, include/defines.h */
 
 /* i64 keeps the game while its players are in i64's menu: 1 = this player
  * paused, 2 = the friend did, 0 = back into the game (KartNet_HostPause). */
+/* The session's host chose what happens to `player` of a device that left (3+ devices). */
+extern "C" N64_GAME_EXPORT int n64_game_dropout(uint32_t player, n64_dropout_action action, const uint32_t* sel,
+                                                uint32_t count) {
+    (void) sel;
+    (void) count;
+    if (action != N64_DROPOUT_CPU && action != N64_DROPOUT_IDLE) {
+        return 1;
+    }
+    return KartNet_Retire((int) player, action == N64_DROPOUT_CPU) ? 0 : 1;
+}
+
+/* The game's own AI drives the kart (as after a human finishes): nothing to choose */
+extern "C" N64_GAME_EXPORT int n64_game_cpu_options(uint32_t player, n64_cpu_options* out) {
+    if (player >= 4 || out == nullptr) {
+        return 0;
+    }
+    std::memset(out, 0, sizeof(*out));
+    return 1;
+}
+
 extern "C" N64_GAME_EXPORT void n64_game_set_paused(int paused) {
     static int pausedBy = 0;
     if (!sRunning || !sOnline) {

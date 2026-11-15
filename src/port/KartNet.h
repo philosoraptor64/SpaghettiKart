@@ -92,6 +92,13 @@ void KartNet_RenderLocalView(void* splitStart); /* a Gfx* */
 int KartNet_SkipSplitRender(void);
 /* Rollback time sync: this displayed frame runs no game logic (1 = hold). */
 extern int gKartNetHoldFrame;
+extern int gKartNetSkipFrame; /* held frame outside races: game_state_handler doesn't run (main.c) */
+/* i64 (ABI v2): who plays where, and the drop-out decisions of the session's host */
+void KartNet_SetLayout(int players, int machines, int localMachine, const int* machineOf, const int* padOf,
+                       int dropoutMenu);
+int KartNet_NumMachines(void);
+int KartNet_MachineLeft(int m);
+int KartNet_Retire(int p, int cpu);
 /* Start of each race frame: deterministic "shell on screen" bits (netplay). */
 void KartNet_UpdateShellVisibility(void);
 /* Zero the drawing-only fields in a copy of gPlayers (sync hash, SyncTest). */

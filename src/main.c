@@ -1241,7 +1241,9 @@ void thread5_iteration(void) {
     read_controllers();
     FB_CreateFramebuffers();
     clear_framebuffer(0); // Clear the framebuffer
-    game_state_handler();
+    if (!gKartNetSkipFrame) { /* netplay: a frame held for a drop-out choice outside races */
+        game_state_handler();
+    }
     Rollback_SyncTestEndFrame();
     ReplayCheck_EndFrame();
     KartNet_EndFrame();

@@ -72,7 +72,7 @@ enum { NET_OFF, NET_HANDSHAKE, NET_RUNNING, NET_DONE };
 static int sInitDone = 0;
 static int sState = NET_OFF;
 static int sIsHost = 0;
-static int sLocalPlayer = 0; /* 0 host, 1 guest */
+static int sLocalPlayer = 0; /* 0 host, 1 guest (i64: this device's first player) */
 static FILE* sLog = NULL;
 
 static int sSock = -1;
@@ -87,7 +87,7 @@ static int sHavePeer = 0;
 /* Match config (host decides; guest receives it). */
 static unsigned int sSeed = 0;
 static int sMode = GRAND_PRIX, sCup = 0, sCourse = 0, sCC = CC_150, sDelay = 2;
-static int sChars[2] = { MARIO, LUIGI };
+static int sChars[4] = { MARIO, LUIGI, YOSHI, TOAD };
 
 static unsigned long sBootFrames = 0;
 static int sRaceRequested = 0;
@@ -154,10 +154,21 @@ static int sDesyncLogged = 0;
  * rollback can undo, so a pending one first waits until every input before it
  * is confirmed and any misprediction is corrected (GateTransition). */
 static int sSession = 0;
-/* People in the session, one per device (player index = device). Only 2 is
- * connected up today (the handshake, records and the local view are 2-player);
- * the menus and the input exchange already follow this number. */
+/* Players in the session. Stand-alone: one per device (player index = device), 2 devices. Inside i64 (ABI v2,
+ * KartNet_SetLayout) up to 4 players on up to 4 devices, each device with 1-4 controllers: player p is driven by
+ * device sMachineOf[p] (0 = the session's host) through that device's controller sPadOf[p]. Records and the
+ * full-screen local view are 2-player only (3-4 players see the game's own 4-way split). */
 static int sSessionPlayers = 2;
+static int sLayoutSet = 0;
+static int sNumMachines = 2, sLocalMachine = 0;
+static int sMachineOf[4] = { 0, 1, 2, 3 }, sPadOf[4] = { 0, 0, 0, 0 };
+static unsigned sLocalMask = 1;
+static unsigned sStartMask = 0;    /* host: guest devices that took the config */
+static int sDropoutMenu = 0;       /* i64 lets the session's host decide a drop-out (else it ends the match) */
+static unsigned sLeftMachines = 0; /* devices that left; their players wait for the host's choice */
+static long sLocalSetTick = -1;    /* the tick whose local input n64net already has */
+int gKartNetSkipFrame = 0;         /* this frame runs no game logic at all (main.c), see NetFrame */
+static int DropoutPending(void);
 static int sRbActive = 0;      /* rollback window open right now */
 static long sRaceStartTick = -1; /* tick the current race (RACING) began, -1 = not racing */
 static int sMenuDelayCeiling = 6; /* MK64_NET_MENU_MAX_DELAY: auto-delay ceiling in lockstep parts */
@@ -420,7 +431,8 @@ static size_t Header(u8* buf, u8 type) {
 static void SendHello(void) {
     u8 buf[16];
     size_t n = Header(buf, PKT_HELLO);
-    buf[n++] = (u8) sChars[1];
+    buf[n++] = (u8) sChars[sLocalPlayer & 3];
+    buf[n++] = (u8) sLocalMachine;
     SendRaw(buf, n);
 }
 
@@ -442,6 +454,7 @@ static void SendConfig(void) {
 static void SendStart(void) {
     u8 buf[8];
     size_t n = Header(buf, PKT_START);
+    buf[n++] = (u8) sLocalMachine;
     SendRaw(buf, n);
 }
 
@@ -469,7 +482,7 @@ static void HandlePacket(const u8* buf, size_t len, const struct sockaddr_in* fr
                 }
                 sPeer = *from;
                 sHavePeer = 1;
-                if (sState == NET_HANDSHAKE) {
+                if (sState == NET_HANDSHAKE && sNumMachines == 2) {
                     sChars[1] = p[0] % 8;
                     if (sChars[1] == sChars[0]) {
                         sChars[1] = (sChars[0] + 1) % 8;
@@ -498,8 +511,18 @@ static void HandlePacket(const u8* buf, size_t len, const struct sockaddr_in* fr
             break;
         case PKT_START:
             if (sIsHost && sState == NET_HANDSHAKE) {
-                sState = NET_RUNNING;
-                Log("guest acknowledged the config; starting");
+                const int m = len >= 1 ? p[0] : 1;
+                const unsigned guests = ((1u << sNumMachines) - 1) & ~1u;
+                if (m > 0 && m < sNumMachines && !(sStartMask & (1u << m))) {
+                    sStartMask |= 1u << m;
+                    if (sNumMachines > 2) {
+                        Log("device %d took the config", m + 1);
+                    }
+                }
+                if ((sStartMask & guests) == guests) {
+                    sState = NET_RUNNING;
+                    Log("%s acknowledged the config; starting", sNumMachines > 2 ? "every guest" : "guest");
+                }
             }
             break;
         case PKT_BYE:
@@ -754,6 +777,13 @@ static void Init(void) {
 
     sIsHost = EnvInt("MK64_NET_HOST", 0) != 0;
     sLocalPlayer = sIsHost ? 0 : 1;
+    if (sLayoutSet) {
+        sIsHost = sLocalMachine == 0;
+        sLocalPlayer = sLocalMask ? __builtin_ctz(sLocalMask) : 0;
+    } else {
+        sLocalMachine = sLocalPlayer;
+        sLocalMask = 1u << sLocalPlayer;
+    }
     sDelay = (int) EnvInt("MK64_NET_DELAY", 2);
     if (sDelay < 0) {
         sDelay = 0;
@@ -766,7 +796,7 @@ static void Init(void) {
     sCup = (int) EnvInt("MK64_NET_CUP", 0);
     sCourse = (int) EnvInt("MK64_NET_COURSE", 0);
     sCC = (int) EnvInt("MK64_NET_CC", CC_150);
-    sChars[sLocalPlayer] = (int) EnvInt("MK64_NET_CHAR", sIsHost ? MARIO : LUIGI) % 8;
+    sChars[sLocalPlayer & 3] = (int) EnvInt("MK64_NET_CHAR", sIsHost ? MARIO : LUIGI) % 8;
     sSeed = (unsigned int) EnvInt("MK64_NET_SEED", (long) (time(NULL) & 0xFFFF)) & 0xFFFF;
     sMaxTicks = (unsigned long) EnvInt("MK64_NET_FRAMES", 0);
     {
@@ -1250,6 +1280,10 @@ static void ResetNetState(void) {
     sRbActive = 0;
     sRaceStartTick = -1;
     sLastCeiling = -1;
+    sStartMask = 0;
+    sLeftMachines = 0;
+    sLocalSetTick = -1;
+    gKartNetSkipFrame = 0;
     for (int i = 0; i < DETAIL_RING; i++) {
         sDetailTick[i] = -1;
     }
@@ -1527,7 +1561,7 @@ static NetPad ExploreInput(unsigned long f) {
              * grand prix, versus, battle), so every mode gets played */
             if (f % 12 == 0) {
                 const int col = gGameModeMenuColumn[gPlayerCount - 1];
-                const int target = sExploreModePicks % 3;
+                const int target = sExploreModePicks % (gPlayerCount >= 3 ? 2 : 3); /* 3-4 players: versus, battle */
                 pad.button = col < target ? D_JPAD : col > target ? U_JPAD : A_BUTTON;
                 if (pad.button == A_BUTTON) {
                     sExploreModePicks++; /* next time, the next mode */
@@ -1689,6 +1723,38 @@ static void GetPad(int p, long tick, n64net_pad* out) {
     n64net_input_get(sNet, p, (uint32_t) tick, out);
 }
 
+/* Drop-outs (i64, 3+ devices): the session's host chose what happens to the players of a device that left
+ * (KartNet_Retire); n64net agrees on the tick everywhere. From then on their inputs are "nothing pressed"; in
+ * menus they confirm the character select (nobody waits for a missing player); in races a CPU drives their
+ * karts if the host chose a CPU (the game's own AI, as after a human finishes; battles have none: idle). Game
+ * state, so it is applied the same way in a re-simulation. */
+enum { KN_ACT_CPU = 1, KN_ACT_IDLE = 3 };
+static void ApplyRetired(int p, long tick, n64net_pad* pad) {
+    if (!sNet || sPlayback) {
+        return;
+    }
+    uint32_t last = 0, apply = 0, size = N64NET_INPUT_MAX_EVENT;
+    uint8_t act[N64NET_INPUT_MAX_EVENT];
+    if (!n64net_input_retired(sNet, p, &last, &apply, act, &size) || tick < (long) apply) {
+        return;
+    }
+    if (gGamestate != RACING) {
+        if (gMenuSelection == CHARACTER_SELECT_MENU && tick % 20 == 0) {
+            pad->buttons |= A_BUTTON;
+        }
+        return;
+    }
+    if (size >= 1 && act[0] == KN_ACT_CPU && gModeSelection != BATTLE) {
+        Player* pl = &gPlayers[p];
+        if ((pl->type & PLAYER_EXISTS) && (pl->type & PLAYER_HUMAN) && !(pl->type & PLAYER_CPU)) {
+            pl->type |= PLAYER_CPU;
+            if (!gRollbackResim) {
+                Log("tick %ld: the CPU drives player %d's kart", tick, p + 1);
+            }
+        }
+    }
+}
+
 static void ApplyNetPads(unsigned long tick) {
     memset(gControllerPads, 0, sizeof(OSContPad) * 4);
     /* In races Start (pause) takes effect ROLLBACK_WINDOW + 1 ticks late: by
@@ -1706,6 +1772,9 @@ static void ApplyNetPads(unsigned long tick) {
                 GetPad(p, (long) tick - shift, &old);
                 pad.buttons |= old.buttons & START_BUTTON;
             }
+        }
+        if (sNumMachines > 2) {
+            ApplyRetired(p, (long) tick, &pad);
         }
         gControllerPads[p].button = pad.buttons;
         gControllerPads[p].stick_x = pad.stick_x;
@@ -1849,11 +1918,13 @@ static void RecordConfirmedHashes(void) {
     for (long t = sLastRecorded + 1; t <= (long) c && t <= (long) sTick; t++) {
         const int slot = (int) (t % RB_HASHES);
         if (sRec) {
-            n64net_pad a, b;
-            n64net_input_get(sNet, 0, (uint32_t) t, &a);
-            n64net_input_get(sNet, 1, (uint32_t) t, &b);
-            fprintf(sRec, "i %ld %04x %d %d %04x %d %d\n", t, a.buttons, a.stick_x, a.stick_y, b.buttons, b.stick_x,
-                    b.stick_y);
+            fprintf(sRec, "i %ld", t);
+            for (int p = 0; p < sSessionPlayers; p++) {
+                n64net_pad a;
+                n64net_input_get(sNet, p, (uint32_t) t, &a);
+                fprintf(sRec, " %04x %d %d", a.buttons, a.stick_x, a.stick_y);
+            }
+            fputc('\n', sRec);
         }
         if (t % HASH_EVERY == 0 && sTickHashTick[slot] == t) {
             unsigned long long h = sTickHash[slot];
@@ -1885,12 +1956,14 @@ static void RecordConfirmedHashes(void) {
  * until the peer is close enough (lockstep: until its input for this tick is
  * here), roll back if a prediction was wrong, then apply this tick's inputs
  * (predicted for the peer if not here yet). */
-static void NetFrame(const NetPad* local) {
+static void NetFrame(const NetPad* pads) {
+    const NetPad* local = &pads[sLocalPlayer & 3];
     if (!sNet) {
         n64net_input_config c;
         memset(&c, 0, sizeof(c));
         c.num_players = sSessionPlayers;
         c.local_player = sLocalPlayer;
+        c.local_mask = sLocalMask;
         c.session_id = (uint32_t) sSeed ^ 0x4D4B3634u;
         c.start_tick = 0;
         c.input_delay = (uint32_t) sDelay;
@@ -1940,8 +2013,24 @@ static void NetFrame(const NetPad* local) {
         sHolds++;
         return;
     }
-    n64net_pad lp = { local->button, local->x, local->y };
-    n64net_input_set_local(sNet, (uint32_t) sTick, lp);
+    if (sLocalSetTick != (long) sTick) { /* (a frame held for a drop-out comes back to the same tick) */
+        if (sLocalMask & (sLocalMask - 1)) {
+            n64net_pad lps[N64NET_INPUT_MAX_PLAYERS];
+            memset(lps, 0, sizeof(lps));
+            for (int p = 0; p < sSessionPlayers; p++) {
+                if (sLocalMask & (1u << p)) {
+                    lps[p].buttons = pads[p].button;
+                    lps[p].stick_x = pads[p].x;
+                    lps[p].stick_y = pads[p].y;
+                }
+            }
+            n64net_input_set_local_pads(sNet, (uint32_t) sTick, lps);
+        } else {
+            n64net_pad lp = { local->button, local->x, local->y };
+            n64net_input_set_local(sNet, (uint32_t) sTick, lp);
+        }
+        sLocalSetTick = (long) sTick;
+    }
 
     if (!n64net_input_ready(sNet, (uint32_t) sTick)) {
         double start = NowMs(), lastPump = start;
@@ -1951,6 +2040,16 @@ static void NetFrame(const NetPad* local) {
             usleep(500);
             Poll();
             n64net_input_resend(sNet);
+            if (DropoutPending()) {
+                /* A device left: i64 shows the host the drop-out choice and freezes the game on every device
+                 * meanwhile, which it can only do between frames. So this frame runs no game logic (races: drawn
+                 * as is; menus: not at all) and the next one comes back to this tick. */
+                gKartNetHoldFrame = 1;
+                gKartNetSkipFrame = gGamestate != RACING;
+                SetWait(0, "A player left\nWaiting for the host...");
+                sStallMs += NowMs() - start;
+                return;
+            }
             double now = NowMs();
             double silentMs = n64net_input_peer_silence_usecs(sNet) / 1000.0;
             int away = n64net_input_peer_away(sNet) || sPeerPaused;
@@ -2096,7 +2195,9 @@ void KartNet_OverrideInput(void) {
         return;
     }
     /* Real controllers only reach the game through the exchanged inputs. */
-    OSContPad live = gControllerPads[0];
+    OSContPad lives[4];
+    memcpy(lives, gControllerPads, sizeof(lives));
+    const OSContPad live = lives[sPadOf[sLocalPlayer & 3] & 3];
     memset(gControllerPads, 0, sizeof(OSContPad) * 4);
     if (sState != NET_RUNNING || !sRaceRequested) {
         return;
@@ -2125,7 +2226,107 @@ void KartNet_OverrideInput(void) {
             Log("opening the pause menu after returning from the background");
         }
     }
-    NetFrame(&local);
+    NetPad pads[4];
+    memset(pads, 0, sizeof(pads));
+    for (int p = 0; p < 4 && p < sSessionPlayers; p++) {
+        if (sLocalMask & (1u << p)) { /* this device's other controllers: its other players */
+            const OSContPad* c = &lives[sPadOf[p] & 3];
+            pads[p].button = c->button;
+            pads[p].x = c->stick_x;
+            pads[p].y = c->stick_y;
+        }
+    }
+    pads[sLocalPlayer & 3] = local;
+    NetFrame(pads);
+}
+
+/* i64 (ABI v2): who plays where (n64_launch.players), before the run starts. */
+void KartNet_SetLayout(int players, int machines, int localMachine, const int* machineOf, const int* padOf,
+                       int dropoutMenu) {
+    if (players < 2 || players > 4 || machines < 2 || machines > 4 || localMachine < 0 || localMachine >= machines) {
+        return;
+    }
+    sLayoutSet = 1;
+    sSessionPlayers = players;
+    sNumMachines = machines;
+    sLocalMachine = localMachine;
+    sDropoutMenu = dropoutMenu;
+    sLocalMask = 0;
+    for (int p = 0; p < players; p++) {
+        sMachineOf[p] = machineOf[p];
+        sPadOf[p] = padOf[p];
+        if (machineOf[p] == localMachine) {
+            sLocalMask |= 1u << p;
+        }
+    }
+}
+
+int KartNet_NumMachines(void) {
+    return sNumMachines;
+}
+
+/* i64: device m left the game (not the host). With 3+ devices and the host deciding, its players wait for
+ * KartNet_Retire; returns 0 if the match must end instead. */
+static double sLeftAt = 0;
+int KartNet_MachineLeft(int m) {
+    if (m <= 0 || m >= sNumMachines || sNumMachines <= 2 || !sDropoutMenu || sState != NET_RUNNING || !sNet) {
+        return 0;
+    }
+    if (!(sLeftMachines & (1u << m))) {
+        if (!sLeftMachines) {
+            sLeftAt = NowMs();
+        }
+        sLeftMachines |= 1u << m;
+        Log("device %d left at tick %lu; waiting for the host's choice", m + 1, sTick);
+    }
+    return 1;
+}
+
+/* The session's host: what happens to player p of a device that left (i64's drop-out menu). */
+int KartNet_Retire(int p, int cpu) {
+    if (!sIsHost || !sNet || p < 0 || p >= sSessionPlayers || (sLocalMask & (1u << p))) {
+        return 0;
+    }
+    const uint8_t act[1] = { (uint8_t) (cpu ? KN_ACT_CPU : KN_ACT_IDLE) };
+    uint32_t apply = 0;
+    if (!n64net_input_retire(sNet, p, act, sizeof(act), &apply)) {
+        return 0;
+    }
+    Log("player %d left: %s from tick %u", p + 1, cpu ? "a CPU" : "idle", apply);
+    return 1;
+}
+
+/* Some left device's players aren't settled yet. */
+static int DropoutPending(void) {
+    if (!sLeftMachines || !sNet) {
+        return 0;
+    }
+    for (int m = 1; m < sNumMachines; m++) {
+        if (!(sLeftMachines & (1u << m))) {
+            continue;
+        }
+        int settled = 1;
+        for (int p = 0; p < sSessionPlayers; p++) {
+            uint32_t last, apply, size = 0;
+            if (sMachineOf[p] == m && !n64net_input_retired(sNet, p, &last, &apply, NULL, &size)) {
+                settled = 0;
+            }
+        }
+        if (settled) {
+            sLeftMachines &= ~(1u << m);
+        }
+    }
+    if (sLeftMachines && NowMs() - sLeftAt > 150000) {
+        Log("no drop-out choice for 2.5 min; netplay stopped");
+        SetEnd("A player left the game.");
+        sState = NET_DONE;
+        sLeftMachines = 0;
+        return 0;
+    }
+    if (!sLeftMachines) {
+        ClearWait();
+    }
+    return sLeftMachines != 0;
 }
 
 /* Hash the simulation part of gPlayers. Drawing a screen writes per-screen
@@ -2280,6 +2481,7 @@ void KartNet_EndFrame(void) {
     }
     if (gKartNetHoldFrame) {
         gKartNetHoldFrame = 0; /* no game tick ran this frame */
+        gKartNetSkipFrame = 0;
         return;
     }
     if (sPlayback) {
