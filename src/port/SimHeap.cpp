@@ -1,3 +1,4 @@
+#include <malloc/malloc.h>
 /*
  * Sim heap: a fixed-address heap for the C++ simulation objects (World
  * actors, objects, emitters, the vectors and strings inside them), so a
@@ -138,6 +139,7 @@ struct PreBlock {
     void* p;
     size_t n;
     void* copy;
+    size_t sz; /* malloc_size at the freeze (0 = not a malloc block) */
 };
 constexpr size_t kMaxPreBlocks = 1 << 16;
 MK_KEEP_SECTION PreBlock sPre[kMaxPreBlocks];
@@ -150,7 +152,7 @@ inline void PreRecord(void* p, size_t n) {
         return;
     }
     if (sPreCount < kMaxPreBlocks) {
-        sPre[sPreCount++] = { p, n, nullptr };
+        sPre[sPreCount++] = { p, n, nullptr, 0 };
     } else {
         sPreOverflow = true;
     }
@@ -377,15 +379,32 @@ void SimHeap_FreezePreMainBlocks(void) {
     for (size_t i = 0; i < sPreCount; i++) {
         sPre[i].copy = malloc(sPre[i].n);
         memcpy(sPre[i].copy, sPre[i].p, sPre[i].n);
+        sPre[i].sz = malloc_size(sPre[i].p);
     }
     fprintf(stderr, "SimHeap: %zu pre-main C++ blocks kept for re-entry%s\n", sPreCount,
             sPreOverflow ? " (TABLE FULL: some missed)" : "");
 }
 
 /* ...and put their contents back with the globals. */
+/* A block can still be freed behind our back: code in another library (libc++'s own compiled functions, e.g. a
+ * std::string growing) frees with free(), not through this module's delete. The allocator may then have handed the
+ * memory to someone else (seen on the iPhone: the process's environment list, overwritten here -> crash in getenv
+ * users after the game stopped). Restore only blocks that are still allocated as they were; drop the others. */
 void SimHeap_RestorePreMainBlocks(void) {
+    size_t kept = 0, dropped = 0;
     for (size_t i = 0; i < sPreCount; i++) {
+        if (sPre[i].sz != 0 && malloc_size(sPre[i].p) != sPre[i].sz) {
+            dropped++;
+            sPre[i] = sPre[--sPreCount];
+            i--;
+            continue;
+        }
         memcpy(sPre[i].p, sPre[i].copy, sPre[i].n);
+        kept++;
+    }
+    if (dropped) {
+        std::sort(sPre, sPre + sPreCount, [](const PreBlock& a, const PreBlock& b) { return a.p < b.p; });
+        fprintf(stderr, "SimHeap: %zu pre-main blocks restored, %zu dropped (freed outside the module)\n", kept, dropped);
     }
 }
 
