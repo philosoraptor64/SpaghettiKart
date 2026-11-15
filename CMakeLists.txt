@@ -5,6 +5,12 @@ project(
   Spaghettify
   VERSION 1.0.0
   LANGUAGES C CXX ASM)
+
+# Builds carry no folder names of this machine (__FILE__ in logs and asserts, debug info): paths under the home
+# folder become ~/...
+if (NOT MSVC AND DEFINED ENV{HOME})
+    add_compile_options("-ffile-prefix-map=$ENV{HOME}=~")
+endif()
 include(FetchContent)
 
 # Set Project Version
