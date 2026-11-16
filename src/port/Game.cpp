@@ -54,7 +54,11 @@ extern "C" {
 // #include "engine/wasm.h"
 }
 
+extern "C" int gKartNetCatchUp;
 extern "C" void Graphics_PushFrame(Gfx* pool) {
+    if (gKartNetCatchUp) {
+        return; /* netplay: catching up with a running session, nothing is shown */
+    }
     GameEngine::ProcessGfxCommands(pool);
 }
 
@@ -1107,10 +1111,14 @@ void push_frame() {
     }
 #endif
     ApplyPendingReset();
-    GameEngine::StartAudioFrame();
+    if (!gKartNetCatchUp) {
+        GameEngine::StartAudioFrame();
+    }
     GameEngine::Instance->StartFrame();
     thread5_iteration();
-    GameEngine::EndAudioFrame();
+    if (!gKartNetCatchUp) {
+        GameEngine::EndAudioFrame();
+    }
     // thread5_game_loop();
     // Graphics_ThreadUpdate();w
 }

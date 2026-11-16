@@ -169,6 +169,13 @@ static unsigned sStartMask = 0;    /* host: guest devices that took the config *
 static int sDropoutMenu = 0;       /* i64 lets the session's host decide a drop-out (else it ends the match) */
 static unsigned sLeftMachines = 0; /* devices that left; their players wait for the host's choice */
 static long sLocalSetTick = -1;    /* the tick whose local input n64net already has */
+/* Joining a running session (i64 N64_LAUNCH_JOINING): this device takes over a departed device's players. It boots
+ * like everyone did and replays the host's input log as fast as it can (KartNet_CatchingUp: frames built but not
+ * shown or heard, i64_module.cpp runs many per host frame) until its players go live again (n64net admit). */
+static int sJoining = 0, sCatching = 0;
+static double sCatchStart = 0;
+int (*gKartNetHostSendTo)(uint32_t machine, const void* data, uint32_t size) = NULL;
+int gKartNetCatchUp = 0; /* a catch-up frame: Game.cpp skips the GPU and the sound */
 int gKartNetSkipFrame = 0;         /* this frame runs no game logic at all (main.c), see NetFrame */
 static int DropoutPending(void);
 static int sRbActive = 0;      /* rollback window open right now */
@@ -1689,6 +1696,15 @@ static void NetSendCb(void* user, const uint8_t* data, uint32_t size) {
     SendRaw(data, size);
 }
 
+/* n64net's input log for a device joining mid-game: to that player's device only */
+static void NetSendToCb(void* user, int player, const uint8_t* data, uint32_t size) {
+    if (gKartNetHostSendTo != NULL && player >= 0 && player < 4) {
+        gKartNetHostSendTo((uint32_t) sMachineOf[player], data, size);
+        return;
+    }
+    NetSendCb(user, data, size);
+}
+
 static void NetLogCb(const char* fmt, ...) {
     char buf[400];
     va_list ap;
@@ -1733,6 +1749,21 @@ static void GetPad(int p, long tick, n64net_pad* out) {
 enum { KN_ACT_CPU = 1, KN_ACT_IDLE = 3 };
 static void ApplyRetired(int p, long tick, n64net_pad* pad) {
     if (!sNet || sPlayback) {
+        return;
+    }
+    uint32_t back = 0;
+    if (n64net_input_rejoined(sNet, p, &back) && tick >= (long) back) {
+        /* someone joined in that player's place: human again (the CPU stops driving; a kart that already
+         * finished keeps the game's own after-the-finish CPU) */
+        if (gGamestate == RACING && gModeSelection != BATTLE) {
+            Player* pl = &gPlayers[p];
+            if ((pl->type & PLAYER_EXISTS) && (pl->type & PLAYER_HUMAN) && (pl->type & PLAYER_CPU) && pl->lapCount < 3) {
+                pl->type &= ~PLAYER_CPU;
+            }
+        }
+        if (!gRollbackResim && tick == (long) back) {
+            Log("tick %ld: player %d is human again (joined mid-game)", tick, p + 1);
+        }
         return;
     }
     uint32_t last = 0, apply = 0, size = N64NET_INPUT_MAX_EVENT;
@@ -1968,6 +1999,8 @@ static void NetFrame(const NetPad* pads) {
         c.num_players = sSessionPlayers;
         c.local_player = sLocalPlayer;
         c.local_mask = sLocalMask;
+        c.joining = sJoining;
+        c.send_to = NetSendToCb;
         c.session_id = (uint32_t) sSeed ^ 0x4D4B3634u;
         c.start_tick = 0;
         c.input_delay = (uint32_t) sDelay;
@@ -2271,6 +2304,52 @@ void KartNet_SetLayout(int players, int machines, int localMachine, const int* m
             sLocalMask |= 1u << p;
         }
     }
+}
+
+void KartNet_SetJoining(int joining) {
+    sJoining = joining ? 1 : 0;
+}
+
+/* this device joined mid-game and hasn't reached the live tick yet: the host's log is replayed unshown */
+int KartNet_CatchingUp(void) {
+    if (!sJoining || sState != NET_RUNNING) {
+        return 0;
+    }
+    if (!sNet) {
+        return 1; /* (the session hasn't started its input exchange yet) */
+    }
+    uint32_t live = UINT32_MAX;
+    const uint32_t have = n64net_input_log_ticks(sNet, &live);
+    const int catching = n64net_input_catching_up(sNet) || live == UINT32_MAX || sTick < (unsigned long) live;
+    if (catching != sCatching) {
+        sCatching = catching;
+        if (catching) {
+            sCatchStart = NowMs();
+            Log("joining the running game: catching up (%u ticks of the host's log here so far)", have);
+        } else {
+            Log("caught up at tick %lu in %.1f s (live from tick %u)", sTick, (NowMs() - sCatchStart) / 1000.0, live);
+        }
+    }
+    return catching;
+}
+
+/* the session's host: a newcomer takes over device m's players (retired: CPUs or idle) */
+int KartNet_Admit(int m) {
+    if (!sIsHost || !sNet || m <= 0 || m >= sNumMachines) {
+        return 0;
+    }
+    uint32_t mask = 0;
+    for (int p = 0; p < sSessionPlayers; p++) {
+        if (sMachineOf[p] == m) {
+            mask |= 1u << p;
+        }
+    }
+    if (!mask || !n64net_input_admit(sNet, mask)) {
+        return 0;
+    }
+    sLeftMachines &= ~(1u << m);
+    Log("device %d joins in the place of players %x: sending it the game so far", m + 1, mask);
+    return 1;
 }
 
 int KartNet_NumMachines(void) {

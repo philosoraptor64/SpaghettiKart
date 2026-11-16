@@ -97,6 +97,10 @@ extern int gKartNetSkipFrame; /* held frame outside races: game_state_handler do
 void KartNet_SetLayout(int players, int machines, int localMachine, const int* machineOf, const int* padOf,
                        int dropoutMenu);
 int KartNet_NumMachines(void);
+void KartNet_SetJoining(int joining); /* i64: this device joins a running session (N64_LAUNCH_JOINING) */
+int KartNet_CatchingUp(void);         /* ... and is still replaying the host's log */
+int KartNet_Admit(int machine);       /* the host: a newcomer takes over that device's players */
+extern int gKartNetCatchUp;           /* this frame is a catch-up frame (no GPU, no sound) */
 int KartNet_ViewLayout(void);      /* 3-4 player races online: 0 off, else this device's layout (1, 2 or 4 views) */
 int KartNet_ViewSlot(int player);  /* local player's slot in that layout, -1 = not on this device */
 int KartNet_IsLocalPlayer(int player);

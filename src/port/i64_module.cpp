@@ -68,6 +68,11 @@ int KartNet_NetDone(void);
 int KartNet_NumMachines(void);
 int KartNet_MachineLeft(int m);
 int KartNet_Retire(int p, int cpu);
+void KartNet_SetJoining(int joining);
+int KartNet_CatchingUp(void);
+int KartNet_Admit(int machine);
+extern int gKartNetCatchUp;
+extern int (*gKartNetHostSendTo)(uint32_t machine, const void* data, uint32_t size);
 void KartNet_SetLayout(int players, int machines, int localMachine, const int* machineOf, const int* padOf,
                        int dropoutMenu);
 const char* KartNet_EndReason(void);
@@ -95,7 +100,8 @@ const n64_game_info kInfo = {
     4, /* 1-4 players: online up to 4 devices, each with any number of its controllers */
     60, /* host frames/s: the 30 Hz logic plus one interpolated picture between ticks (Engine.cpp) */
     N64_GAME_INFO_CAN_UNLOCK_ALL, /* "everything unlocked": Extra (mirror) mode */
-    N64_DROPOUT_CAN_CPU | N64_DROPOUT_CAN_IDLE, /* 3+ devices: the game's AI drives a leaver's kart, or it idles */
+    N64_DROPOUT_CAN_CPU | N64_DROPOUT_CAN_IDLE | N64_DROPOUT_CAN_JOIN, /* 3+ devices: the game's AI drives a leaver's
+                                                                          kart, or it idles; someone may join later */
     4,
 };
 
@@ -379,6 +385,8 @@ extern "C" N64_GAME_EXPORT int n64_game_start(const n64_host* host, const n64_la
         }
         KartNet_SetLayout((int) launch->player_count, (int) launch->num_machines, (int) launch->local_machine,
                           machineOf, padOf, (launch->flags & N64_LAUNCH_DROPOUT_MENU) != 0);
+        KartNet_SetJoining((launch->flags & N64_LAUNCH_JOINING) != 0);
+        gKartNetHostSendTo = host->net_send_to;
         SetEnv("MK64_NET", "1");
         SetEnv("MK64_NET_HOST", isHost ? "1" : "0");
         SetEnv("MK64_NET_SESSION", "1"); /* the whole game as one console */
@@ -446,6 +454,18 @@ extern "C" N64_GAME_EXPORT n64_frame_result n64_game_frame(void) {
         sHostFrames = sLogicTicks = 0;
         sStatsAt = nowMs + 5000;
     }
+    // joined mid-game: replay the host's log, unshown and unheard, as many frames as fit in ~14 ms of this host frame
+    if (sOnline && KartNet_CatchingUp()) {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(14);
+        gKartNetCatchUp = 1;
+        int ok = 1;
+        do {
+            ok = Port_RunFrame();
+            sLogicTicks++;
+        } while (ok && KartNet_CatchingUp() && !KartNet_NetDone() && std::chrono::steady_clock::now() < until);
+        gKartNetCatchUp = 0;
+        return ok ? N64_GAME_FRAME_CONTINUE : N64_GAME_FRAME_EXIT;
+    }
     // the host frame between two logic ticks: the interpolated picture
     if (GameEngine_HostFrameWithoutLogic()) {
         return N64_GAME_FRAME_CONTINUE;
@@ -471,6 +491,11 @@ extern "C" N64_GAME_EXPORT int n64_game_dropout(uint32_t player, n64_dropout_act
         return 1;
     }
     return KartNet_Retire((int) player, action == N64_DROPOUT_CPU) ? 0 : 1;
+}
+
+/* The session's host: a newcomer takes over the players of `machine` (a device that left; CPU or idle since). */
+extern "C" N64_GAME_EXPORT int n64_game_admit(uint32_t machine) {
+    return KartNet_Admit((int) machine) ? 0 : 1;
 }
 
 /* The game's own AI drives the kart (as after a human finishes): nothing to choose */
