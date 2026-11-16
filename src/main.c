@@ -395,12 +395,18 @@ void update_controller(s32 index) {
     controller->stickDirection = stick;
 }
 
+/* i64: its controllers (one mapping for every game) replace what libultraship read; set by the i64 module */
+void (*gHostPadOverride)(OSContPad* pads) = NULL;
+
 void read_controllers(void) {
     // OSMesg msg;
 
     osContStartReadData(&gSIEventMesgQueue);
     // osRecvMesg(&gSIEventMesgQueue, &msg, OS_MESG_BLOCK);
     osContGetReadData(gControllerPads);
+    if (gHostPadOverride != NULL) {
+        gHostPadOverride(gControllerPads);
+    }
     ReplayCheck_OverrideInput();
     KartNet_OverrideInput();
     Rollback_SyncTestRecordInput();

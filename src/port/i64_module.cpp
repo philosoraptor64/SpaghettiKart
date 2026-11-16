@@ -111,6 +111,32 @@ extern "C" const char* gLusEepromFile;    /* libultraship os_eeprom.cpp */
 /* Survive the reset of the globals between runs (Reentry.cpp). */
 #define KEEP __attribute__((section("__DATA,__mkkeep")))
 KEEP const n64_host* sHost = nullptr;
+
+/* i64's controllers (n64_host.pad_read, docs/controllers.md in i64): pad k of this device -> port k, in place of
+ * what libultraship read, so a controller behaves the same in every game. Online, KartNet takes this device's
+ * pads from these ports as before. */
+struct HostOSContPad {
+    uint16_t button;
+    int8_t stick_x;
+    int8_t stick_y;
+    uint8_t errnum;
+};
+static_assert(sizeof(HostOSContPad) == 6, "OSContPad layout");
+extern "C" void (*gHostPadOverride)(HostOSContPad* pads);
+static void HostPadOverride(HostOSContPad* pads) {
+    if (sHost == nullptr || sHost->pad_read == nullptr) {
+        return;
+    }
+    for (uint32_t k = 0; k < 4; k++) {
+        n64_pad_state st{};
+        if (!sHost->pad_read(k, &st)) {
+            st = {};
+        }
+        pads[k].button = st.buttons;
+        pads[k].stick_x = st.stick_x;
+        pads[k].stick_y = st.stick_y;
+    }
+}
 extern "C" bool gLusHostPaced; /* libultraship gfx_sdl2.cpp */
 /* libultraship gfx_metal.cpp: one picture of the screen for i64's home screen */
 extern "C" void (*gLusFrameCaptureCallback)(const uint8_t* rgba, uint32_t w, uint32_t h);
@@ -353,6 +379,7 @@ extern "C" N64_GAME_EXPORT int n64_game_start(const n64_host* host, const n64_la
     Reentry_SavePristine();
 
     sHost = host;
+    gHostPadOverride = (host->abi_version >= 2 && host->pad_read != nullptr) ? HostPadOverride : nullptr;
     gLusHostPaced = (launch->flags & N64_LAUNCH_HOST_PACED) != 0; /* libultraship: i64 paces the frames */
     sRunFrames = 0;
     gLusFrameCaptureCallback = host->offer_title_art;
@@ -562,6 +589,7 @@ extern "C" N64_GAME_EXPORT void n64_game_stop(void) {
     SimHeap_ReleaseForReentry();
     Reentry_RestorePristine();
     sRunning = false;
+    gHostPadOverride = nullptr;
     sHost = nullptr;
 }
 
