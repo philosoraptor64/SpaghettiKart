@@ -181,6 +181,10 @@ static int DropoutPending(void);
 static int sRbActive = 0;      /* rollback window open right now */
 static long sRaceStartTick = -1; /* tick the current race (RACING) began, -1 = not racing */
 static int sMenuDelayCeiling = 6; /* MK64_NET_MENU_MAX_DELAY: auto-delay ceiling in lockstep parts */
+/* menu rollback (see MenuRollbackSafe) */
+static int sMenuRollback = 0;
+static long sMenuStartTick = -1, sMenuRbFrom = 10;
+static int sLastGamestate = -1;
 static int sLastCeiling = -1;
 
 /* Desync forensics. Every race writes "<log>.rec": the race config, every
@@ -819,6 +823,7 @@ static void Init(void) {
     gRandomTrace = sRecAll ? RandomTraceCb : NULL;
     gCameraUpdateTrace = sRecAll ? CameraTraceCb : NULL;
     sMenuDelayCeiling = (int) EnvInt("MK64_NET_MENU_MAX_DELAY", 6);
+    sMenuRollback = (int) EnvInt("MK64_NET_MENU_ROLLBACK", 0) != 0; /* off by default: see MenuRollbackSafe */
     sRbWindow = (uint32_t) EnvInt("MK64_NET_ROLLBACK_WINDOW", 8);
     sRbFrom = EnvInt("MK64_NET_ROLLBACK_FROM", 60);
     if (sRollback && !SimHeap_Enable()) {
@@ -1363,8 +1368,31 @@ static int RaceRollbackSafe(void) {
             gRaceState == RACE_CALCULATE_RANKS);
 }
 
+/* Online sessions can roll back in the menus too (owner's item 10; MK64_NET_MENU_ROLLBACK=1, off by default until
+ * the SyncTest below is clean). A menu frame's logic runs in its drawing code, so a re-simulated menu frame builds its display list too and
+ * forgets it (main.c rollback_sim_frame). Which menus: see MenuRollbackSafe. No rollback ever crosses a game-state
+ * change or a switch into a lockstep menu (gated like a race's end: GateTransition). */
+static int MenuRollbackSafe(void) {
+    /* NOT READY (2026-11-18), so off unless MK64_NET_MENU_ROLLBACK=1: SyncTest through the menus
+     * (MK64_SYNCTEST=8 MK64_SYNCTEST_MENUS=only, session + explore bots) still finds the memory pool differing by
+     * ~90-120 KB after a re-run in the main menu and character select, most likely menu assets that load at different
+     * moments. Fix that first. Planned scope: the title and main menu first. Lockstep regardless: the logo/intro screens (a water texture's
+     * scroll is clock-paced: drawing only, but it fails SyncTest), character select (its memory pool differs after a
+     * re-run: ~100 KB, likely character assets loading at different moments), course select (it swaps the World's
+     * C++ track object, outside the snapshot), Options/Data/Controller Pak (they write the save). */
+    return sSession && sMenuRollback && gGamestate <= COURSE_SELECT_MENU_FROM_QUIT && gGamestateNext == gGamestate &&
+           (gMenuSelection == START_MENU || gMenuSelection == MAIN_MENU);
+}
+static int RollbackSafe(void) {
+    return RaceRollbackSafe() || MenuRollbackSafe();
+}
+
+int KartNet_MenuRollbackSafe(void) {
+    return MenuRollbackSafe();
+}
+
 static void SessionBeforeGamestate(void) {
-    if (sRbActive && !RaceRollbackSafe()) {
+    if (sRbActive && !RollbackSafe()) {
         GateTransition();
         if (sState != NET_RUNNING) {
             return;
@@ -1501,7 +1529,13 @@ void KartNet_BeginFrame(void) {
         }
         Log("race requested (boot frame %lu)", sBootFrames);
     }
-    if (sRaceRequested && gGamestate == RACING && gGamestateNext == RACING) {
+    static int syncTestMenus = -1;
+    if (syncTestMenus < 0) {
+        /* SyncTest the menus too (sessions); MK64_SYNCTEST_MENUS=only: the menus only */
+        syncTestMenus = !getenv("MK64_SYNCTEST_MENUS") ? 0 : strcmp(getenv("MK64_SYNCTEST_MENUS"), "only") == 0 ? 2 : 1;
+    }
+    if ((syncTestMenus < 2 && sRaceRequested && gGamestate == RACING && gGamestateNext == RACING) ||
+        (syncTestMenus && MenuRollbackSafe())) {
         Rollback_SyncTestBeginFrame((long) sTick);
     }
 }
@@ -2026,7 +2060,12 @@ static void NetFrame(const NetPad* pads) {
         /* Rollback only inside a race that is far enough in (its setup isn't
          * rollback-safe); one-race mode counts from the race request. */
         const long raceStart = sSession ? sRaceStartTick : 0;
-        const int want = sRollback && raceStart >= 0 && (long) sTick - raceStart >= sRbFrom && RaceRollbackSafe();
+        if (gGamestate != sLastGamestate) {
+            sLastGamestate = gGamestate;
+            sMenuStartTick = (long) sTick;
+        }
+        const int want = sRollback && ((raceStart >= 0 && (long) sTick - raceStart >= sRbFrom && RaceRollbackSafe()) ||
+                                       (MenuRollbackSafe() && (long) sTick - sMenuStartTick >= sMenuRbFrom));
         if (want && !sRbActive) {
             n64net_input_set_window(sNet, sRbWindow);
             sRbActive = 1;
@@ -2129,7 +2168,7 @@ static void NetFrame(const NetPad* pads) {
     if (depth > 0) {
         Rollback_RestoreDrawingState(); /* the next frame draws from what the last one drew */
     }
-    if (depth > 0 && !RaceRollbackSafe()) {
+    if (depth > 0 && !RollbackSafe()) {
         /* The re-simulation ran into a pause, the finish or a game state
          * change, which the peer (without this rollback) saw at the top of
          * this tick: confirm it the same way here, apply a pending state
@@ -2209,9 +2248,9 @@ static void GateTransition(void) {
         sRbCount++;
         sRbFrames += (unsigned long) depth;
         Log("tick %u: pause/finish/state change re-checked after a %d-tick rollback: %s", T, depth,
-            RaceRollbackSafe() ? "gone" : "still happens");
+            RollbackSafe() ? "gone" : "still happens");
     }
-    if (!RaceRollbackSafe()) {
+    if (!RollbackSafe()) {
         n64net_input_set_window(sNet, 0);
         sRbActive = 0;
         if (sSession) {

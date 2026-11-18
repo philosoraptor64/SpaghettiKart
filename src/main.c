@@ -1209,6 +1209,17 @@ void thread5_game_loop(void) {
  * (rollback re-simulation; port/Rollback.cpp). */
 void rollback_sim_frame(void) {
     update_all_controllers();
+    if (gGamestate != RACING) {
+        /* A menu frame (online sessions roll back in the menus too): the menus' logic runs in their drawing code, so
+         * build the frame's display list as usual, then forget it (the live frame draws over it). */
+        Gfx* head = gDisplayListHead;
+        osViBlack(0);
+        update_menus();
+        init_rcp();
+        func_80094A64(gGfxPool);
+        gDisplayListHead = head;
+        return;
+    }
     race_logic_loop();
 }
 

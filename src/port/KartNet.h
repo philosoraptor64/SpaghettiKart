@@ -63,6 +63,8 @@ void KartNet_HostPause(int paused, int initiator); /* i64 pause: both sides away
 int KartNet_WantsLocalView(void);
 /* 1 while the race logic advances the screen fades (menu_items.c netplay_advance_screen_transitions) */
 int KartNet_TransitionsInLogic(void);
+/* Online session, a menu frame that rolls back (Rollback.cpp SyncTest uses it too). */
+int KartNet_MenuRollbackSafe(void);
 
 /* In-game Online screen (port/ui/OnlineWindow.cpp). Phases: */
 enum { KARTNET_UI_IDLE, KARTNET_UI_FINDING, KARTNET_UI_CONNECTING, KARTNET_UI_SESSION };

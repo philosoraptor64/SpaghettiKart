@@ -49,6 +49,7 @@ extern OSContPad gControllerPads[4];
 #include "objects.h"
 #include "render_player.h"
 #include "menu_items.h"
+#include "menus.h"
 void rollback_sim_frame(void); /* main.c */
 extern const size_t gPlayerVtxSize[8]; /* data/some_data.c */
 extern struct ObjectInterpData2 prevObject2[]; /* math_util_2.c */
@@ -535,8 +536,15 @@ void Rollback_SyncTestEndFrame(void) {
     }
     long from = sTick - sSyncTestN + 1;
     Frame& first = sRing[(size_t) from % sRing.size()];
-    if (first.tick != from || gGamestate != RACING || gGamestateNext != RACING) {
+    const bool menus = getenv("MK64_SYNCTEST_MENUS") && KartNet_MenuRollbackSafe();
+    const bool menusOnly = getenv("MK64_SYNCTEST_MENUS") && strcmp(getenv("MK64_SYNCTEST_MENUS"), "only") == 0;
+    if (first.tick != from || !((!menusOnly && gGamestate == RACING && gGamestateNext == RACING) || menus)) {
         return;
+    }
+    for (long t = from; t <= sTick; t++) { /* every frame in the window was a checkable one (no state change) */
+        if (sRing[(size_t) t % sRing.size()].tick != t) {
+            return;
+        }
     }
     static Snapshot real, resim;
     auto dumpSky = [](const char* when) {
@@ -590,7 +598,8 @@ void Rollback_SyncTestEndFrame(void) {
     if (bad) {
         sMismatches++;
         if (sMismatches <= 20 || sMismatches % 100 == 0 || sReported.size() != sReportedBefore) {
-            LogLine("MISMATCH after frame %ld (resim from %ld): %zu bytes", sTick, from, bad);
+            LogLine("MISMATCH after frame %ld (resim from %ld): %zu bytes (game state %d, menu %d)", sTick, from, bad,
+                    gGamestate, gMenuSelection);
         }
     }
     dumpSky("after resim");
