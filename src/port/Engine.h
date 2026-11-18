@@ -65,6 +65,7 @@ class GameEngine {
     static void HandleAudioThread();
     static void StartAudioFrame();
     static void EndAudioFrame();
+    static void RenderAudioFrame();
     static void AudioExit();
 
 
@@ -101,7 +102,7 @@ extern "C" {
 #endif
 void GameEngine_ProcessGfxCommands(Gfx* commands);
 uint32_t GameEngine_GetSampleRate();
-void GameEngine_AudioKeepAlive(void); /* netplay stalls: keep the voice chat playing */
+void GameEngine_AudioKeepAlive(int game_paused); /* netplay stalls: keep the music (and voice) playing */
 void GameEngine_DrawStatusFrame(void); /* netplay waits: a frame with only the status overlay */
 uint32_t GameEngine_GetSamplesPerFrame();
 float GameEngine_GetAspectRatio();

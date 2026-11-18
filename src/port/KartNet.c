@@ -51,7 +51,7 @@ int CVarGetInteger(const char* name, int defaultValue);
 #ifdef KARTNET_VOICE
 #include "n64net_voice.h"
 #endif
-void GameEngine_AudioKeepAlive(void); /* Engine.cpp */
+void GameEngine_AudioKeepAlive(int game_paused); /* Engine.cpp */
 #if defined(__APPLE__)
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
@@ -628,13 +628,14 @@ static void VoiceUpdate(void) {
     }
     if (sVoiceStarted) {
         n64net_voice_pump(VoiceSend);
-        GameEngine_AudioKeepAlive();
     }
 #endif
 }
 
 static void Poll(void) {
     u8 buf[1500];
+    /* in every wait loop: the music plays on while the game waits (only paused on purpose: silence) */
+    GameEngine_AudioKeepAlive(sPeerPaused);
     FlushSim();
     for (;;) {
         struct sockaddr_in from;

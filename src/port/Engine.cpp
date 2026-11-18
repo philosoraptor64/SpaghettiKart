@@ -595,7 +595,17 @@ void GameEngine::HandleAudioThread() {
             }
         }
         std::unique_lock<std::mutex> Lock(audio.mutex);
+        RenderAudioFrame();
+        audio.processing = false;
+        audio.cv_from_thread.notify_one();
+    }
+}
 
+/* One audio frame: the game's sound engine (music sequences, sounds already playing) and HMAS, mixed and played.
+ * The audio thread runs it once per game frame; netplay stalls run it on their own (GameEngine_AudioKeepAlive).
+ * Caller holds audio.mutex. */
+void GameEngine::RenderAudioFrame() {
+    {
         int samples_left = AudioOutBuffered();
         u32 num_audio_samples = samples_left < AudioPlayerGetDesiredBuffered() ? SAMPLES_HIGH : SAMPLES_LOW;
 
@@ -616,9 +626,6 @@ void GameEngine::HandleAudioThread() {
         }
 
         AudioOutPlay(mix_buffer, 2 * num_audio_samples);
-
-        audio.processing = false;
-        audio.cv_from_thread.notify_one();
     }
 }
 
@@ -753,13 +760,15 @@ extern "C" uint32_t GameEngine_GetSampleRate() {
     return player->GetSampleRate();
 }
 
-/* Netplay stalls (waiting for the other player) stop the game's audio, and
- * with it the voice chat. Called from the netplay wait loops on the game
- * thread: while the audio thread is idle and no game audio was played for
- * 30 ms, play a block of silence carrying the voice. */
-extern "C" void GameEngine_AudioKeepAlive(void) {
-#ifdef KARTNET_VOICE
-    if (!n64net_voice_is_running() || AudioNowUs() - sLastAudioPlayUs < 30000) {
+/* Netplay stalls (waiting for the other player) stop the game loop, and with it the game's audio frames.
+ * Called from the netplay wait loops on the game thread: while the audio thread is idle and no game audio was
+ * played for 20 ms, run audio frames on their own, at the output's pace, so the music keeps playing in tempo
+ * (i64 todo item 3). The sound engine is not part of the netplay simulation (src/audio is outside the rollback
+ * snapshot, and SyncTest passes with it never stepped during resimulation): the game logic doesn't read it,
+ * so this device's music can run ahead of the others' without any effect on the game. The game's sound
+ * requests during the stall are none (no game frames); new ones apply when it resumes. */
+extern "C" void GameEngine_AudioKeepAlive(int game_paused) {
+    if (AudioNowUs() - sLastAudioPlayUs < 20000) {   /* (a game frame plays audio every ~17 ms) */
         return;
     }
     std::unique_lock<std::mutex> lock(audio.mutex, std::try_to_lock);
@@ -770,9 +779,16 @@ extern "C" void GameEngine_AudioKeepAlive(void) {
     if (rate == 0 || AudioOutBuffered() >= AudioPlayerGetDesiredBuffered()) {
         return;
     }
-    s16 block[SAMPLES_PER_FRAME] = { 0 };
-    AudioOutPlay(block, 2 * SAMPLES_LOW);
+    if (game_paused) {   /* paused on purpose (a player is in i64's menu): only the voice, over silence */
+#ifdef KARTNET_VOICE
+        if (n64net_voice_is_running()) {
+            s16 block[SAMPLES_PER_FRAME] = { 0 };
+            AudioOutPlay(block, 2 * SAMPLES_LOW);
+        }
 #endif
+        return;
+    }
+    GameEngine::RenderAudioFrame();
 }
 
 /* Netplay waits block the game loop: draw one frame with no game graphics so
