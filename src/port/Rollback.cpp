@@ -66,9 +66,20 @@ struct Region {
     size_t size;
 };
 
+/* The menus' C++ state (course select): the World's cup and each cup's track cursor, and which track object is
+ * loaded. Outside the C sections, so a rollback in the menus put them back by hand (and rebuilds the track object). */
+struct MenuCups {
+    size_t cupIndex = 0;
+    long currentCup = -1;   /* index in World::Cups */
+    std::vector<size_t> cursors;
+    std::string track;      /* the World's track (ResourceName), "" = none */
+    std::string selected;   /* TrackBrowser's last selected track (its "already selected" cache) */
+};
+
 struct Snapshot {
     std::vector<uint8_t> data, bss, pool, heap, roots;
     uintptr_t poolUsed = 0;
+    MenuCups menu;
     bool valid = false;
 };
 
@@ -122,8 +133,44 @@ std::vector<Root> Roots() {
     return r;
 }
 
+extern "C" const char* TrackBrowser_GetSelectedTrack(void);          /* engine/TrackBrowser.cpp */
+extern "C" void TrackBrowser_RestoreSelectedTrack(const char* name);
+extern "C" void TrackBrowser_SetTrack(const char* name);
+
+static void SaveMenuCups(MenuCups& m) {
+    World* w = GetWorld();
+    m.cupIndex = w->CupIndex;
+    m.currentCup = -1;
+    m.cursors.clear();
+    for (size_t i = 0; i < w->Cups.size(); i++) {
+        if (w->Cups[i] == w->GetCurrentCup()) m.currentCup = (long) i;
+        m.cursors.push_back(w->Cups[i] ? w->Cups[i]->CursorPosition : 0);
+    }
+    m.track = w->GetTrack() ? w->GetTrack()->ResourceName : "";
+    m.selected = TrackBrowser_GetSelectedTrack();
+}
+
+static void LoadMenuCups(const MenuCups& m) {
+    World* w = GetWorld();
+    w->CupIndex = m.cupIndex;
+    if (m.currentCup >= 0 && (size_t) m.currentCup < w->Cups.size()) {
+        w->SetCurrentCup(w->Cups[(size_t) m.currentCup]);   /* (resets its cursor: restored next) */
+    }
+    for (size_t i = 0; i < w->Cups.size() && i < m.cursors.size(); i++) {
+        if (w->Cups[i]) w->Cups[i]->CursorPosition = m.cursors[i];
+    }
+    const std::string now = w->GetTrack() ? w->GetTrack()->ResourceName : "";
+    if (!m.track.empty() && now != m.track) {
+        TrackBrowser_SetTrack(m.track.c_str());   /* the track object as it was (course select swaps it) */
+    }
+    TrackBrowser_RestoreSelectedTrack(m.selected.c_str());
+}
+
 void Save(Snapshot& s) {
     int scope = SimHeap_Suspend(); /* the snapshot buffers themselves: system heap */
+    if (gGamestate != RACING) {
+        SaveMenuCups(s.menu);
+    }
     s.data.assign(sData.base, sData.base + sData.size);
     s.bss.assign(sBss.base, sBss.base + sBss.size);
     s.poolUsed = gNextFreeMemoryAddress - PoolStart();
@@ -156,6 +203,11 @@ void Load(const Snapshot& s) {
             memcpy(r.p, s.roots.data() + off, r.n);
         }
         off += r.n;
+    }
+    if (gGamestate != RACING && s.menu.currentCup >= 0) {   /* (gGamestate: just restored) */
+        int scope = SimHeap_Suspend();
+        LoadMenuCups(s.menu);
+        SimHeap_Resume(scope);
     }
 }
 

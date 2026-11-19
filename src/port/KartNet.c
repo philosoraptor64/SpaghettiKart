@@ -1375,12 +1375,11 @@ static int RaceRollbackSafe(void) {
  * forgets it (main.c rollback_sim_frame). Which menus: see MenuRollbackSafe. No rollback ever crosses a game-state
  * change or a switch into a lockstep menu (gated like a race's end: GateTransition). */
 static int MenuRollbackSafe(void) {
-    /* ON (2026-11-19) in the title, the main menu and character select: SyncTest through them (MK64_SYNCTEST=8
-     * MK64_SYNCTEST_MENUS=only, MK64_NET_BOT_EXPLORE + MK64_NET_BOT_MENUS, three seeds, ~5000 checks) is clean. The
-     * earlier "memory pool ~100 KB different" was SyncTest's own bug (an unrecorded frame was checked under the last
-     * recorded tick). Lockstep: course select (it swaps the World's C++ track object and the menu keeps pointers into
-     * it, outside the snapshot: MK64_NET_MENU_ROLLBACK=2 tests it), the logo/intro screens, Options/Data/Controller Pak
-     * (they write the save). */
+    /* ON (2026-11-19) in the title, main menu, character select and course select: SyncTest through them
+     * (MK64_SYNCTEST=8 MK64_SYNCTEST_MENUS=only, MK64_NET_BOT_EXPLORE + MK64_NET_BOT_MENUS) is clean. The earlier
+     * "memory pool ~100 KB different" was SyncTest's own bug (an unrecorded frame was checked under the last recorded
+     * tick). Course select's C++ state (the World's cup, track cursors, track object) is in the snapshot
+     * (Rollback.cpp MenuCups). Lockstep: the logo/intro screens, Options/Data/Controller Pak (they write the save). */
     if (!(sSession && sMenuRollback && gGamestate <= COURSE_SELECT_MENU_FROM_QUIT && gGamestateNext == gGamestate)) {
         return 0;
     }
@@ -1390,11 +1389,8 @@ static int MenuRollbackSafe(void) {
     if (sRbActive && sRbMenu >= 0 && gMenuSelection != sRbMenu) {
         return 0;
     }
-    if (gMenuSelection == START_MENU || gMenuSelection == MAIN_MENU || gMenuSelection == CHARACTER_SELECT_MENU) {
-        return 1;
-    }
-    /* MK64_NET_MENU_ROLLBACK=2 (tests): course select too, to see what still differs there */
-    return sMenuRollback >= 2 && gMenuSelection == COURSE_SELECT_MENU;
+    return gMenuSelection == START_MENU || gMenuSelection == MAIN_MENU || gMenuSelection == CHARACTER_SELECT_MENU ||
+           gMenuSelection == COURSE_SELECT_MENU;
 }
 static int RollbackSafe(void) {
     return RaceRollbackSafe() || MenuRollbackSafe();

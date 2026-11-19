@@ -94,6 +94,14 @@ extern "C" void TrackBrowser_ResetSelectedTrack(void) {
     sCurrentlySelectedTrack = "";
 }
 
+/* rollback in the menus (port/Rollback.cpp): the "already selected" cache goes back with the rest */
+extern "C" const char* TrackBrowser_GetSelectedTrack(void) {
+    return sCurrentlySelectedTrack.c_str();
+}
+extern "C" void TrackBrowser_RestoreSelectedTrack(const char* name) {
+    sCurrentlySelectedTrack = name ? name : "";
+}
+
 extern "C" void TrackBrowser_NextTrack(void) {
     TrackBrowser::Instance->NextTrack();
 }
