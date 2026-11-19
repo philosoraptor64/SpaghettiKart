@@ -165,6 +165,7 @@ struct Frame {
     Snapshot snap;          /* state at the start of the frame (before input) */
     OSContPad pads[4];      /* the frame's inputs after netplay/replay overrides */
     long tick = -1;
+    int liveMenu = -1, liveFade = -1, liveDelay = -1, liveMenuFade = -1; /* MK64_SYNCTEST_TRACE: after the live frame */
 };
 
 int sSyncTestN = 0;
@@ -509,11 +510,13 @@ int Rollback_SyncTestActive(void) {
 }
 
 /* Start of frame `tick` (before the inputs are applied). */
+static bool sBegun = false; /* this frame was recorded (BeginFrame ran for it) */
 void Rollback_SyncTestBeginFrame(long tick) {
     if (sSyncTestN <= 0) {
         return;
     }
     sTick = tick;
+    sBegun = true;
     double t0 = NowMs();
     Frame& f = sRing[(size_t) tick % sRing.size()];
     Save(f.snap);
@@ -523,7 +526,7 @@ void Rollback_SyncTestBeginFrame(long tick) {
 
 /* The frame's final inputs (after netplay/replay overrides). */
 void Rollback_SyncTestRecordInput(void) {
-    if (sSyncTestN <= 0 || sTick < 0) {
+    if (sSyncTestN <= 0 || sTick < 0 || !sBegun) {   /* (an unrecorded frame would overwrite the last recorded inputs) */
         return;
     }
     memcpy(sRing[(size_t) sTick % sRing.size()].pads, gControllerPads, sizeof(gControllerPads));
@@ -531,6 +534,21 @@ void Rollback_SyncTestRecordInput(void) {
 
 /* End of frame `tick` (logic and drawing done). */
 void Rollback_SyncTestEndFrame(void) {
+    /* Only a frame that was recorded: otherwise sTick still names the last recorded one, and the state after this
+     * later frame was compared with a replay that stops earlier (false mismatches one frame after every switch into
+     * a frame SyncTest doesn't record, e.g. each menu change). */
+    const bool begun = sBegun;
+    sBegun = false;
+    if (!begun) {
+        return;
+    }
+    if (sSyncTestN > 0 && sTick >= 0) {
+        Frame& cur = sRing[(size_t) sTick % sRing.size()];
+        cur.liveMenu = gMenuSelection;
+        cur.liveFade = gFadeModeSelection;
+        cur.liveDelay = gMenuDelayTimer;
+        cur.liveMenuFade = gMenuFadeType;
+    }
     if (sSyncTestN <= 0 || sTick < sSyncTestN || sTick < sSyncTestFrom) {
         return;
     }
@@ -566,15 +584,43 @@ void Rollback_SyncTestEndFrame(void) {
     OSContPad saved[4];
     memcpy(saved, gControllerPads, sizeof(saved));
     gRollbackResim = 1;
+    static char trace[2048];
+    trace[0] = 0;
     for (long t = from; t <= sTick; t++) {
         memcpy(gControllerPads, sRing[(size_t) t % sRing.size()].pads, sizeof(gControllerPads));
         rollback_sim_frame();
+        const Frame& lf = sRing[(size_t) t % sRing.size()];
+        size_t n = strlen(trace);
+        snprintf(trace + n, sizeof(trace) - n, " [%ld b%04x/%04x live m%d f%d d%d t%d | replay m%d f%d d%d t%d]", t,
+                 (unsigned) lf.pads[0].button, (unsigned) lf.pads[1].button, lf.liveMenu, lf.liveFade, lf.liveDelay,
+                 lf.liveMenuFade, gMenuSelection, gFadeModeSelection, gMenuDelayTimer, gMenuFadeType);
     }
     gRollbackResim = 0;
     memcpy(gControllerPads, saved, sizeof(saved));
     sResimMs += NowMs() - t0;
     Save(resim);
     WorldCounts resimCounts = CountWorld();
+    if (getenv("MK64_SYNCTEST_TWICE")) {
+        /* test: a second replay of the same frames; replay vs replay (MISMATCH2) separates "the live frame had an
+         * input the replay lacks" (replays agree) from "a replay depends on state outside the snapshot" */
+        static Snapshot resim2;
+        Load(first.snap);
+        gRollbackResim = 1;
+        for (long t = from; t <= sTick; t++) {
+            memcpy(gControllerPads, sRing[(size_t) t % sRing.size()].pads, sizeof(gControllerPads));
+            rollback_sim_frame();
+        }
+        gRollbackResim = 0;
+        memcpy(gControllerPads, saved, sizeof(saved));
+        Save(resim2);
+        MaskDrawingState(resim2);
+        Snapshot r1 = resim;
+        MaskDrawingState(r1);
+        const size_t b2 = Compare("data", r1.data, resim2.data, (uintptr_t) sData.base) +
+                          Compare("bss", r1.bss, resim2.bss, (uintptr_t) sBss.base) +
+                          Compare("pool", r1.pool, resim2.pool, PoolStart());
+        if (b2) LogLine("MISMATCH2 replay vs replay after frame %ld: %zu bytes (menu %d)", sTick, b2, gMenuSelection);
+    }
     /* Continue from the state the normal frames produced (before masking the
      * copies for the comparison below). */
     Load(real);
@@ -600,13 +646,23 @@ void Rollback_SyncTestEndFrame(void) {
         if (sMismatches <= 20 || sMismatches % 100 == 0 || sReported.size() != sReportedBefore) {
             LogLine("MISMATCH after frame %ld (resim from %ld): %zu bytes (game state %d, menu %d)", sTick, from, bad,
                     gGamestate, gMenuSelection);
+            if (getenv("MK64_SYNCTEST_TRACE")) LogLine("  trace:%s", trace);
         }
     }
     dumpSky("after resim");
-    if (sChecks % 300 == 0) {
+    static unsigned long perMenu[16];   /* checks per menu (gMenuSelection), in the summary below */
+    perMenu[gMenuSelection & 15]++;
+    static const long every = getenv("MK64_SYNCTEST_EVERY") ? std::max(1L, strtol(getenv("MK64_SYNCTEST_EVERY"), nullptr, 0)) : 300;
+    if (sChecks % every == 0) {
         LogLine("synctest frame %ld: %lu checks, %lu mismatches; save %.2f ms, resim of %d frames %.2f ms (avg)",
                 sTick, sChecks, sMismatches, sSaveMs / (double) (sChecks + sSyncTestN), sSyncTestN,
                 sResimMs / (double) sChecks);
+        if (getenv("MK64_SYNCTEST_MENUS")) {
+            LogLine("  checks per menu: start %lu, main %lu, characters %lu, courses %lu, other %lu", perMenu[START_MENU],
+                    perMenu[MAIN_MENU], perMenu[CHARACTER_SELECT_MENU], perMenu[COURSE_SELECT_MENU],
+                    sChecks - perMenu[START_MENU] - perMenu[MAIN_MENU] - perMenu[CHARACTER_SELECT_MENU] -
+                        perMenu[COURSE_SELECT_MENU]);
+        }
     }
 }
 

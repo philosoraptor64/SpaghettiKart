@@ -588,7 +588,12 @@ void func_800C2274(u8 player) {
                 D_8018FC10[sp46][1] = sp42;
                 for (var_s0 = 0; var_s0 < 4; var_s0++) {
                     if (D_8018FC10[var_s0][0] != why) {
-                        func_8001AAAC(var_s0, D_8018FC10[var_s0][0], D_8018FC10[var_s0][1]);
+                        /* @port online: the music's camera cuts (sequence script -> camera player) come from the
+                         * audio's own clock, not the game tick, so the devices would cut at different moments, and a
+                         * rollback replay (no audio) loses the cut: none online (cosmetic) */
+                        if (!KartNet_IsActive()) {
+                            func_8001AAAC(var_s0, D_8018FC10[var_s0][0], D_8018FC10[var_s0][1]);
+                        }
                         D_8018FC10[var_s0][0] = why;
                     }
                 }
