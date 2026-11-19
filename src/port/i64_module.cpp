@@ -572,15 +572,15 @@ extern "C" N64_GAME_EXPORT void n64_game_set_paused(int paused) {
     }
 }
 
-/* Ready to be frozen: not in a race that is still running (a race first
- * opens its pause menu, from the Start pressed by KartNet_HostPause). */
 /* why frame() ended the game, for i64's menu ("" = the player quit) */
 extern "C" N64_GAME_EXPORT void n64_game_exit_message(char* out, size_t cap) {
     std::snprintf(out, cap, "%s", sOnline ? KartNet_EndReason() : "");
 }
 
+/* 0 while a Start press would open the pause menu (a race, not yet paused): i64 then presses Start itself and
+ * keeps running frames until the menu is open. Offline too. */
 extern "C" N64_GAME_EXPORT int n64_game_pause_ready(void) {
-    if (!sRunning || !sOnline) {
+    if (!sRunning) {
         return 1;
     }
     return (gGamestate == kGamestateRacing && gIsGamePaused == 0) ? 0 : 1;

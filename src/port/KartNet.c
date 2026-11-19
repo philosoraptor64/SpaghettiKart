@@ -1324,19 +1324,15 @@ void KartNet_SetPaused(int paused) {
 }
 
 /* The host app (i64) paused or resumed the game on both machines: both say
- * "paused" meanwhile (neither gives up on the other's silence). The side whose
- * player paused presses Start when the pause begins: in a race that opens the
- * game's pause menu (i64 waits for it, n64_game_pause_ready), so coming back
- * is instant; in menus nothing is pressed and the game just carries on. */
+ * "paused" meanwhile (neither gives up on the other's silence). In a race, i64
+ * itself presses Start on the pausing player's controller (n64_game_pause_ready
+ * says a pause menu can open), so both games open the pause menu on the same
+ * tick and coming back is instant; in menus nothing is pressed. */
 void KartNet_HostPause(int paused, int initiator) {
+    (void) initiator;
     KartNet_SetPaused(paused);
-    if (paused && initiator && sState == NET_RUNNING) {
-        /* press Start now (a normal input, so both games open the pause menu
-         * on the same tick); i64 keeps running frames until it is open */
-        sInjectStart = 1;
-    }
     if (!paused) {
-        sInjectStart = 0; /* already in the pause menu (or in a menu): nothing to press */
+        sInjectStart = 0;
     }
 }
 
@@ -2316,6 +2312,8 @@ void KartNet_OverrideInput(void) {
         local = (sTick < sReplayLen) ? sReplay[sTick] : none;
     } else if (sBot) {
         local = BotInput(sTick);
+        /* a real Start press still counts (i64 presses Start when a player goes back to i64 mid-race) */
+        local.button |= (u16) (live.button & START_BUTTON);
     } else {
         local.button = live.button;
         local.x = live.stick_x;
