@@ -6,6 +6,7 @@
 #include <math.h>
 #include "port/Engine.h"
 #include "FrameInterpolation.h"
+#include "port/SimHeap.h"
 #include "matrix.h"
 #include "engine/Matrix.h"
 #include "src/engine/CoreMath.h"
@@ -262,7 +263,17 @@ bool has_inv_actor_mtx;
 MtxF inv_actor_mtx;
 size_t inv_actor_mtx_path_index;
 
+/* The recording is drawing state, not simulation: never in the rollback sim heap. Some records come from code the race
+ * logic runs inside SimHeap_Enter; a rollback then restored the sim heap's own bookkeeping under them, the blocks were
+ * handed out again while the recording still held them, and freeing the recording crashed ("pointer being freed was
+ * not allocated", MK online with rollbacks). */
+struct NotInSimHeap {
+    int saved = SimHeap_Suspend();
+    ~NotInSimHeap() { SimHeap_Resume(saved); }
+};
+
 Data& append(Op op) {
+    NotInSimHeap outside;
     auto& m = current_path.back()->ops[op];
     current_path.back()->items.emplace_back(op, m.size());
     return m.emplace_back();
@@ -620,6 +631,7 @@ bool check_if_recording() {
 }
 
 void FrameInterpolation_StartRecord(void) {
+    NotInSimHeap outside;
     previous_recording = move(current_recording);
     current_recording = {};
     current_path.clear();
@@ -646,6 +658,7 @@ void FrameInterpolation_RecordOpenChild(const void* a, uintptr_t b) {
         return;
     }
     label key = { a, b };
+    NotInSimHeap outside;
     auto& m = current_path.back()->children[key];
     append(Op::OpenChild).open_child = { key, m.size() };
     current_path.push_back(&m.emplace_back());
