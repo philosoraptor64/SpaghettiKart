@@ -55,9 +55,17 @@ extern "C" {
 }
 
 extern "C" int gKartNetCatchUp;
+/* i64 out of view (n64_game_set_hidden): the game keeps running, nothing is drawn (no GPU work) */
+static std::atomic<bool> sPortHidden{ false };
+extern "C" void Port_SetHidden(int hidden) {
+    sPortHidden = hidden != 0;
+}
+extern "C" int Port_IsHidden(void) {
+    return sPortHidden ? 1 : 0;
+}
 extern "C" void Graphics_PushFrame(Gfx* pool) {
-    if (gKartNetCatchUp) {
-        return; /* netplay: catching up with a running session, nothing is shown */
+    if (gKartNetCatchUp || sPortHidden) {
+        return; /* netplay: catching up with a running session, or i64 out of view: nothing is shown */
     }
     GameEngine::ProcessGfxCommands(pool);
 }
@@ -1061,7 +1069,7 @@ extern "C" {
 // the main thread, synchronously, before the app actually goes away.
 static std::atomic<bool> sIosInBackground{ false };
 extern "C" int Port_IsInBackground(void) {
-    return sIosInBackground ? 1 : 0;
+    return (sIosInBackground || Port_IsHidden()) ? 1 : 0;
 }
 
 static int IosLifecycleWatch(void*, SDL_Event* event) {
@@ -1100,7 +1108,7 @@ static bool IosWaitWhileBackgrounded() {
 
 #if !defined(PLATFORM_IOS)
 extern "C" int Port_IsInBackground(void) {
-    return 0;
+    return Port_IsHidden();
 }
 #endif
 

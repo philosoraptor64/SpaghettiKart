@@ -56,6 +56,9 @@ void Port_RequestStop(void);
 void LUS_SetExternalWindow(void* sdlWindow, void** rendererCache);
 void LUS_SetExternalPacing(bool hostPaced);
 void GameEngine_SetOnePicturePerHostFrame(bool on);   // Engine.cpp
+extern "C" void Port_SetHidden(int hidden);   // Game.cpp
+extern "C" int Port_IsHidden(void);
+static bool sOnePicturePerHost = false;   // host-paced: 60 host frames/s, logic every other one
 int GameEngine_HostFrameWithoutLogic(void);
 /* Game audio goes to the host (Engine.cpp AudioOutPlay). */
 extern void (*gPortHostAudioWrite)(const int16_t* stereo, uint32_t frames, uint32_t rate);
@@ -446,7 +449,8 @@ extern "C" N64_GAME_EXPORT int n64_game_start(const n64_host* host, const n64_la
     }
     LUS_SetExternalWindow(host->window, &sRenderer);
     LUS_SetExternalPacing((launch->flags & N64_LAUNCH_HOST_PACED) != 0);
-    GameEngine_SetOnePicturePerHostFrame((launch->flags & N64_LAUNCH_HOST_PACED) != 0);
+    sOnePicturePerHost = (launch->flags & N64_LAUNCH_HOST_PACED) != 0;
+    GameEngine_SetOnePicturePerHostFrame(sOnePicturePerHost);
     gPortHostAudioWrite = host->audio_write;
     gPortHostAudioBuffered = host->audio_buffered;
 
@@ -471,7 +475,7 @@ extern "C" N64_GAME_EXPORT n64_frame_result n64_game_frame(void) {
                                std::chrono::steady_clock::now().time_since_epoch()).count();
     sHostFrames++;
     ++sRunFrames;
-    if (PreviewDue(sRunFrames) && sHost && sHost->offer_title_art) {
+    if (!Port_IsHidden() && PreviewDue(sRunFrames) && sHost && sHost->offer_title_art) {
         gLusFrameCaptureRequest = 1; /* a picture for i64's home screen (libultraship gfx_metal.cpp) */
     }
     if (nowMs >= sStatsAt) {
@@ -492,6 +496,15 @@ extern "C" N64_GAME_EXPORT n64_frame_result n64_game_frame(void) {
         } while (ok && KartNet_CatchingUp() && !KartNet_NetDone() && std::chrono::steady_clock::now() < until);
         gKartNetCatchUp = 0;
         return ok ? N64_GAME_FRAME_CONTINUE : N64_GAME_FRAME_EXIT;
+    }
+    // out of view: the logic still runs at 30 Hz (every other host frame), nothing is drawn
+    if (Port_IsHidden()) {
+        static unsigned sHiddenPhase = 0;
+        if (sOnePicturePerHost && (++sHiddenPhase & 1)) {
+            return N64_GAME_FRAME_CONTINUE;
+        }
+        sLogicTicks++;
+        return Port_RunFrame() ? N64_GAME_FRAME_CONTINUE : N64_GAME_FRAME_EXIT;
     }
     // the host frame between two logic ticks: the interpolated picture
     if (GameEngine_HostFrameWithoutLogic()) {
@@ -534,6 +547,20 @@ extern "C" N64_GAME_EXPORT int n64_game_cpu_options(uint32_t player, n64_cpu_opt
     return 1;
 }
 
+/* i64 went out of view (1) or came back (0): keep playing, drawing nothing meanwhile (no GPU work). */
+extern "C" N64_GAME_EXPORT void n64_game_set_hidden(int hidden) {
+    if (!sRunning) {
+        Port_SetHidden(0);
+        return;
+    }
+    Port_SetHidden(hidden);
+    // drop the interpolated picture still pending from the last drawn tick (it would draw while hidden)
+    GameEngine_SetOnePicturePerHostFrame(sOnePicturePerHost);
+    if (sHost && sHost->log) {
+        sHost->log(hidden ? "mk64: out of view, still running (nothing drawn)" : "mk64: back in view");
+    }
+}
+
 extern "C" N64_GAME_EXPORT void n64_game_set_paused(int paused) {
     static int pausedBy = 0;
     if (!sRunning || !sOnline) {
@@ -570,6 +597,7 @@ extern "C" N64_GAME_EXPORT void n64_game_stop(void) {
     }
     gLusFrameCaptureCallback = nullptr;
     gLusFrameCaptureRequest = 0;
+    Port_SetHidden(0);
     KartNet_Shutdown();
     Port_RunEnd(1);
     Rollback_ReleaseForReentry();
