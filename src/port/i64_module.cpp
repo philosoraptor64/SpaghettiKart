@@ -73,6 +73,8 @@ int KartNet_MachineLeft(int m);
 int KartNet_Retire(int p, int cpu);
 void KartNet_SetJoining(int joining);
 int KartNet_CatchingUp(void);
+void KartNet_CatchUpProgress(uint32_t* done, uint32_t* total);
+int KartNet_JoinPending(void);
 int KartNet_Admit(int machine);
 extern int gKartNetCatchUp;
 extern int (*gKartNetHostSendTo)(uint32_t machine, const void* data, uint32_t size);
@@ -482,17 +484,9 @@ extern "C" N64_GAME_EXPORT n64_frame_result n64_game_frame(void) {
         sHostFrames = sLogicTicks = 0;
         sStatsAt = nowMs + 5000;
     }
-    // joined mid-game: replay the host's log, unshown and unheard, as many frames as fit in ~14 ms of this host frame
+    // joined mid-game: i64 drives the catch-up (n64_game_catching_up / n64_game_catch_up_tick)
     if (sOnline && KartNet_CatchingUp()) {
-        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(14);
-        gKartNetCatchUp = 1;
-        int ok = 1;
-        do {
-            ok = Port_RunFrame();
-            sLogicTicks++;
-        } while (ok && KartNet_CatchingUp() && !KartNet_NetDone() && std::chrono::steady_clock::now() < until);
-        gKartNetCatchUp = 0;
-        return ok ? N64_GAME_FRAME_CONTINUE : N64_GAME_FRAME_EXIT;
+        return N64_GAME_FRAME_CONTINUE;
     }
     // out of view: the logic still runs at 30 Hz (every other host frame), nothing is drawn
     if (Port_IsHidden()) {
@@ -531,6 +525,31 @@ extern "C" N64_GAME_EXPORT int n64_game_dropout(uint32_t player, n64_dropout_act
 }
 
 /* The session's host: a newcomer takes over the players of `machine` (a device that left; CPU or idle since). */
+/* joining mid-game (item 20): i64 runs the loop, the budget and the progress display */
+extern "C" N64_GAME_EXPORT int n64_game_catching_up(uint32_t* done, uint32_t* total) {
+    if (!sRunning || !sOnline || !KartNet_JoinPending()) {
+        return 0;
+    }
+    KartNet_CatchUpProgress(done, total);
+    return 1;
+}
+
+extern "C" N64_GAME_EXPORT n64_frame_result n64_game_catch_up_tick(void) {
+    if (!sRunning || PollPeerLeft() || KartNet_NetDone() || KartNet_EndReason()[0]) {
+        return N64_GAME_FRAME_EXIT;
+    }
+    uint32_t before = 0, after = 0;
+    KartNet_CatchUpProgress(&before, nullptr);
+    gKartNetCatchUp = 1; /* a frame built but not drawn or heard (Game.cpp) */
+    const int ok = Port_RunFrame();
+    gKartNetCatchUp = 0;
+    if (!ok) {
+        return N64_GAME_FRAME_EXIT;
+    }
+    KartNet_CatchUpProgress(&after, nullptr);
+    return after == before ? N64_GAME_FRAME_WAITING : N64_GAME_FRAME_CONTINUE;
+}
+
 extern "C" N64_GAME_EXPORT int n64_game_admit(uint32_t machine) {
     return KartNet_Admit((int) machine) ? 0 : 1;
 }

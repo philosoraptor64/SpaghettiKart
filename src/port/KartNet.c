@@ -172,7 +172,7 @@ static long sLocalSetTick = -1;    /* the tick whose local input n64net already 
 /* Joining a running session (i64 N64_LAUNCH_JOINING): this device takes over a departed device's players. It boots
  * like everyone did and replays the host's input log as fast as it can (KartNet_CatchingUp: frames built but not
  * shown or heard, i64_module.cpp runs many per host frame) until its players go live again (n64net admit). */
-static int sJoining = 0, sCatching = 0;
+static int sJoining = 0, sCatching = 0, sCaughtUp = 0;
 static double sCatchStart = 0;
 int (*gKartNetHostSendTo)(uint32_t machine, const void* data, uint32_t size) = NULL;
 int gKartNetCatchUp = 0; /* a catch-up frame: Game.cpp skips the GPU and the sound */
@@ -2372,6 +2372,22 @@ void KartNet_SetLayout(int players, int machines, int localMachine, const int* m
 
 void KartNet_SetJoining(int joining) {
     sJoining = joining ? 1 : 0;
+    sCaughtUp = 0;
+}
+
+/* i64's catch-up (n64_game_catching_up): from the joining launch, through the handshake, until live; once */
+int KartNet_JoinPending(void) {
+    if (!sJoining || sCaughtUp) {
+        return 0;
+    }
+    if (sState != NET_RUNNING) {
+        return sState != NET_OFF; /* (the handshake with the host first) */
+    }
+    if (!KartNet_CatchingUp()) {
+        sCaughtUp = 1;
+        return 0;
+    }
+    return 1;
 }
 
 /* this device joined mid-game and hasn't reached the live tick yet: the host's log is replayed unshown */
@@ -2395,6 +2411,16 @@ int KartNet_CatchingUp(void) {
         }
     }
     return catching;
+}
+
+/* for i64's progress display: ticks played and the live tick (0 while unknown) */
+void KartNet_CatchUpProgress(uint32_t* done, uint32_t* total) {
+    uint32_t live = UINT32_MAX;
+    if (sNet) {
+        n64net_input_log_ticks(sNet, &live);
+    }
+    if (done) *done = (uint32_t) sTick;
+    if (total) *total = live == UINT32_MAX ? 0 : live;
 }
 
 /* the session's host: a newcomer takes over device m's players (retired: CPUs or idle) */

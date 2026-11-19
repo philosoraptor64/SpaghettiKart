@@ -305,6 +305,10 @@ typedef struct n64_launch {
  * game's starting state and never writes it into the player's save file: an unlocked run keeps a save of its own
  * (recomp runtime: recomp_save_subfolder "unlocked"), so its progress is kept too. */
 #define N64_LAUNCH_UNLOCK_ALL (1u << 3)
+/* v2, with N64_LAUNCH_JOINING: this machine is a new one taking over players nobody played (CPUs; n64_game_add),
+ * not a departed machine's place. Its players' controllers weren't there when the game started: a game that
+ * sees controller presence counts them as plugged in only from the tick n64net_input_rejoined gives. */
+#define N64_LAUNCH_JOIN_NEW (1u << 4)
 
 #define N64_GAME_SESSION_BLOB_MAX (64 * 1024)
 
@@ -323,6 +327,7 @@ N64_GAME_EXPORT int n64_game_start(const n64_host* host, const n64_launch* launc
 typedef enum n64_frame_result {
     N64_GAME_FRAME_CONTINUE = 0,
     N64_GAME_FRAME_EXIT = 1,  /* the player quit, the session ended, or request_exit() */
+    N64_GAME_FRAME_WAITING = 2, /* n64_game_catch_up_tick only: the next tick's inputs haven't arrived yet */
 } n64_frame_result;
 
 /* One game frame: input, game logic, rendering, present. Never blocks:
@@ -335,10 +340,33 @@ N64_GAME_EXPORT n64_frame_result n64_game_frame(void);
  * sides tell each other (no one gives up on the silence meanwhile). */
 N64_GAME_EXPORT void n64_game_set_paused(int paused);
 
+/* Optional (added 2026-11-18, todo items 9/18): the app went out of view = 1 (iOS: the background, e.g. the
+ * player swiped to another app), or came back = 0. A module that exports this keeps its game running while
+ * hidden, like a music app: i64 goes on calling n64_game_frame() at target_fps (from a timer: the display link
+ * stops in the background) and plays its audio; online, the others are not told to wait. Until set_hidden(0)
+ * the module must not touch the GPU (no drawing, presenting or next-drawable calls: iOS forbids GPU work in the
+ * background), and nothing in it may wait on a frame being shown.
+ * Without it, i64 stops calling frame() while hidden and the others wait for this device (as before), and
+ * the module gets SDL_APP_WILLENTERBACKGROUND / SDL_APP_DIDENTERFOREGROUND as SDL events.
+ * In both cases SDL's own lifecycle events never reach a module: on iOS SDL sends "will enter background"
+ * (and window minimized/focus lost) as soon as the app is merely inactive (the app switcher, Control Center,
+ * a split-view resize), while the game is still on screen. i64 drops those and sends the background events
+ * itself, only for the real background. [main thread] */
+N64_GAME_EXPORT void n64_game_set_hidden(int hidden);
+
+/* Optional (2026-11-19): i64 wants a picture of the game for its home screen (it decides when: ~30 s into a
+ * run, then every minute, never while hidden). Capture the next frame drawn and hand it to
+ * host->offer_title_art. The module keeps no timing of its own. [main thread, just before a frame() call] */
+N64_GAME_EXPORT void n64_game_capture_preview(void);
+
 /* Optional. After set_paused(1 or 2), i64 keeps calling frame() until this
  * returns 1 (at most ~1.5 s), then stops: a game can use those frames to open
  * its own pause menu, so it is already paused when the players come back.
- * Without it, i64 stops calling frame() at once. */
+ * Without it, i64 stops calling frame() at once.
+ * Return 0 only while a Start press would open the game's pause menu (in gameplay, pausing allowed, not yet
+ * paused), else 1. When it returns 0 right after set_paused(1), i64 presses Start itself on the pausing player's
+ * controller (through pad_read, ~80 ms, L and R released): online that press travels as a normal input, so every
+ * machine opens the pause menu on the same tick. The module never injects Start for this. (2026-11-19) */
 N64_GAME_EXPORT int n64_game_pause_ready(void);
 
 /* Back to a clean slate: join threads, free game heaps, restore globals, flush
@@ -395,6 +423,31 @@ N64_GAME_EXPORT int n64_game_dropout(uint32_t player, n64_dropout_action action,
  * with N64_LAUNCH_JOINING; this module brings it up to date (n64net_input_admit). Returns 0, or nonzero if
  * it can't now. */
 N64_GAME_EXPORT int n64_game_admit(uint32_t machine);
+
+/* Optional (v2, added 2026-11-16), joining into players nobody has played (CPUs from the start):
+ * n64_game_open_players: the players a newcomer could take over now (bit p = player p; this game's ports),
+ * e.g. CPUs in a match that never had a human. Asked on the machine that started the game. 0 = none.
+ * n64_game_add: the newcomer becomes the new `machine` (the next index) and takes `player_mask` over
+ * (n64net_input_add). The newcomer starts with N64_LAUNCH_JOINING; in its player table those players are its
+ * own, and players nobody plays are listed with machine N64_MACHINE_NONE. Every machine turns the CPUs into
+ * humans at the tick n64net_input_rejoined gives. Returns 0, or nonzero if it can't now. */
+#define N64_MACHINE_NONE 0xFF
+N64_GAME_EXPORT uint32_t n64_game_open_players(void);
+N64_GAME_EXPORT int n64_game_add(uint32_t machine, uint32_t player_mask);
+
+/* Optional (v2, added 2026-11-19, item 20): joining mid-game with i64 driving the catch-up. A module with both
+ * leaves the fast-forward loop, its time budget and the progress display to i64:
+ * n64_game_catching_up: 1 while this machine (started with N64_LAUNCH_JOINING) still has to catch up (the
+ * host's log hasn't all arrived, or the game hasn't played up to the tick its players go live at), else 0.
+ * done/total (may be NULL): ticks played and the live tick (total 0 while unknown).
+ * n64_game_catch_up_tick: plays exactly one logic tick from the host's log, not paced, drawn or heard;
+ * N64_GAME_FRAME_WAITING when that tick's inputs haven't arrived (i64 tries again next host frame).
+ * While catching up i64 calls n64_game_catch_up_tick() as often as fits in a frame's budget instead of
+ * n64_game_frame(), keeps the game window hidden and shows its own progress; no pause meanwhile. Whatever the
+ * game must do when it's caught up (e.g. re-anchoring its pacing) it does in the tick that reaches the live
+ * tick. */
+N64_GAME_EXPORT int n64_game_catching_up(uint32_t* done, uint32_t* total);
+N64_GAME_EXPORT n64_frame_result n64_game_catch_up_tick(void);
 
 #ifdef __cplusplus
 }
