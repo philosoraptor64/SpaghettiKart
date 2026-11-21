@@ -1262,12 +1262,16 @@ void thread5_iteration(void) {
     read_controllers();
     FB_CreateFramebuffers();
     clear_framebuffer(0); // Clear the framebuffer
-    if (!gKartNetSkipFrame) { /* netplay: a frame held for a drop-out choice outside races */
+    const int skipped = gKartNetSkipFrame; /* (KartNet_EndFrame clears it) */
+    if (!skipped) { /* netplay: a frame held outside races (time sync, a drop-out choice) */
         game_state_handler();
     }
     Rollback_SyncTestEndFrame();
     ReplayCheck_EndFrame();
     KartNet_EndFrame();
+    if (skipped) {
+        return; /* nothing was drawn: keep the last picture on screen (and no display-side timers tick) */
+    }
 
     // call_render_hook();
 

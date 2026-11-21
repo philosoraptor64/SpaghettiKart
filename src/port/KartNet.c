@@ -2109,6 +2109,10 @@ static void NetFrame(const NetPad* pads) {
     }
     if (sRbActive && n64net_timesync_should_skip(sNet)) {
         gKartNetHoldFrame = 1; /* we're ahead: show this frame again, let the peer catch up */
+        /* A menu's logic runs in its drawing code (game_state_handler), so outside races a held frame must not run
+         * it at all: drawing the menu "again" ran one extra menu frame on the side that held (conformance suite:
+         * the guest held once in the title screen, left it a tick early and the seeds parted at tick 600). */
+        gKartNetSkipFrame = gGamestate != RACING;
         sHolds++;
         return;
     }
