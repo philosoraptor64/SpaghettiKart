@@ -14,3 +14,4 @@ _n64_game_set_hidden
 _n64_game_capture_preview
 _n64_game_catching_up
 _n64_game_catch_up_tick
+_n64_game_phase

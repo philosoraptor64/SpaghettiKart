@@ -151,6 +151,22 @@ static unsigned sRunFrames = 0;
 /* i64 decides when it wants a home-screen picture (todo item 20: one rule in i64 for every game) */
 static volatile int sPreviewWanted = 0;
 extern "C" N64_GAME_EXPORT void n64_game_capture_preview(void) { sPreviewWanted = 1; }
+
+/* What the players are doing (i64 logs it; the conformance suite's PvP pass needs MULTI): a race or battle that
+ * isn't the attract demo is play, with gPlayerCount humans (the menus' player count; CPUs aren't counted). */
+extern "C" {
+extern int32_t gGamestate; /* main.c */
+extern uint16_t gDemoMode; /* main.c */
+extern int8_t gPlayerCount; /* menus.c */
+}
+extern "C" N64_GAME_EXPORT int n64_game_phase(uint32_t* humans) {
+    const bool play = gGamestate == 4 /* RACING */ && gDemoMode == 0 /* DEMO_MODE_INACTIVE */;
+    const uint32_t n = play && gPlayerCount > 0 ? (uint32_t) gPlayerCount : 0;
+    if (humans) {
+        *humans = n;
+    }
+    return !play ? 1 /* N64_PHASE_MENU */ : n >= 2 ? 3 /* N64_PHASE_MULTI */ : 2 /* N64_PHASE_SOLO */;
+}
 static bool PreviewDue(unsigned frame) {
     (void) frame;
     if (!sPreviewWanted) return false;
