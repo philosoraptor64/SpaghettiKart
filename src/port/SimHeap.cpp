@@ -146,6 +146,8 @@ MK_KEEP_SECTION PreBlock sPre[kMaxPreBlocks];
 MK_KEEP_SECTION size_t sPreCount = 0;
 MK_KEEP_SECTION bool sPreFrozen = false; /* the pristine copy was taken */
 MK_KEEP_SECTION bool sPreOverflow = false;
+#define N64_PREMAIN_KEEP MK_KEEP_SECTION
+#include "i64/n64_premain.h" /* pre-main blocks in a zone of their own: never reused, safe to write back */
 
 inline void PreRecord(void* p, size_t n) {
     if (sPreFrozen || !p) {
@@ -190,7 +192,10 @@ inline void* NewImpl(size_t n) {
         fprintf(stderr, "SimHeap: out of space (%zu bytes)\n", n);
         abort();
     }
-    void* p = n64_big_alloc(n); /* big blocks go back to the system when freed (n64_bigblock.h) */
+    void* p = sPreFrozen ? nullptr : n64_premain_alloc(n ? n : 1, 16);
+    if (!p) {
+        p = n64_big_alloc(n); /* big blocks go back to the system when freed (n64_bigblock.h) */
+    }
     if (!p) {
         p = malloc(n ? n : 1);
     }
@@ -228,8 +233,8 @@ inline void* NewAligned(size_t n, std::align_val_t al) {
     if (sEnabled && tScope > 0) {
         sAlignedFallbacks++;
     }
-    void* p = nullptr;
-    if (posix_memalign(&p, (size_t) al, n ? n : 1) != 0) {
+    void* p = sPreFrozen ? nullptr : n64_premain_alloc(n ? n : 1, (size_t) al);
+    if (!p && posix_memalign(&p, (size_t) al, n ? n : 1) != 0) {
         throw std::bad_alloc();
     }
     PreRecord(p, n ? n : 1);
@@ -376,13 +381,16 @@ void SimHeap_FreezePreMainBlocks(void) {
     }
     std::sort(sPre, sPre + sPreCount, [](const PreBlock& a, const PreBlock& b) { return a.p < b.p; });
     sPreFrozen = true;
+    n64_premain_seal();
     for (size_t i = 0; i < sPreCount; i++) {
         sPre[i].copy = malloc(sPre[i].n);
         memcpy(sPre[i].copy, sPre[i].p, sPre[i].n);
         sPre[i].sz = malloc_size(sPre[i].p);
     }
-    fprintf(stderr, "SimHeap: %zu pre-main C++ blocks kept for re-entry%s\n", sPreCount,
-            sPreOverflow ? " (TABLE FULL: some missed)" : "");
+    size_t own = 0;
+    for (size_t i = 0; i < sPreCount; i++) own += n64_premain_owns(sPre[i].p) ? 1 : 0;
+    fprintf(stderr, "SimHeap: %zu pre-main C++ blocks kept for re-entry (%zu in the pre-main zone)%s\n", sPreCount,
+            own, sPreOverflow ? " (TABLE FULL: some missed)" : "");
 }
 
 /* ...and put their contents back with the globals. */
@@ -393,7 +401,7 @@ void SimHeap_FreezePreMainBlocks(void) {
 void SimHeap_RestorePreMainBlocks(void) {
     size_t kept = 0, dropped = 0;
     for (size_t i = 0; i < sPreCount; i++) {
-        if (sPre[i].sz != 0 && malloc_size(sPre[i].p) != sPre[i].sz) {
+        if (!n64_premain_owns(sPre[i].p) && sPre[i].sz != 0 && malloc_size(sPre[i].p) != sPre[i].sz) {
             dropped++;
             sPre[i] = sPre[--sPreCount];
             i--;
