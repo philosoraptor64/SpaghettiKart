@@ -854,6 +854,7 @@ static void Init(void) {
     sBotQuitAt = EnvInt("MK64_NET_BOT_QUIT", 0);
     sBotQuitFinish = EnvInt("MK64_NET_BOT_QUIT_FINISH", 0) != 0;
     sBotExplore = EnvInt("MK64_NET_BOT_EXPLORE", 0) != 0;
+    sExploreModePicks = (int) EnvInt("MK64_NET_BOT_EXPLORE_MODE", 2); /* 0 grand prix, 1 versus, 2 battle (the first pick) */
     sExploreRng = (unsigned int) EnvInt("MK64_NET_BOT_EXPLORE", 1) * 2654435761u + (sIsHost ? 1u : 7u);
     LoadReplay(getenv("MK64_NET_REPLAY"));
     sBotState = (unsigned int) sBot * 2654435761u + 1;
@@ -1799,6 +1800,23 @@ static void GetPad(int p, long tick, n64net_pad* out) {
  * karts if the host chose a CPU (the game's own AI, as after a human finishes; battles have none: idle). Game
  * state, so it is applied the same way in a re-simulation. */
 enum { KN_ACT_CPU = 1, KN_ACT_IDLE = 3 };
+static void TestFinish(int p) {
+    /* MK64_NET_TEST_FINISH_AT=<seconds> (tests; the same on every device): at that race time the humans' laps count as
+     * done, as the game's own debug lap skip does, so the race ends and the results screens and menus run without
+     * anyone driving. Game state, so a re-simulation does the same. */
+    extern s32 gLapCountByPlayerId[];
+    static long testFinishAt = -2;
+    if (testFinishAt == -2) {
+        testFinishAt = EnvInt("MK64_NET_TEST_FINISH_AT", -1);
+    }
+    if (testFinishAt >= 0 && gGamestate == RACING && gModeSelection != BATTLE && gRaceState == RACE_IN_PROGRESS &&
+        gCourseTimer >= (f32) testFinishAt) {
+        if ((gPlayers[p].type & PLAYER_EXISTS) && (gPlayers[p].type & PLAYER_HUMAN) && gLapCountByPlayerId[p] < 3) {
+            gLapCountByPlayerId[p] = 3;
+        }
+    }
+}
+
 static void ApplyRetired(int p, long tick, n64net_pad* pad) {
     if (!sNet || sPlayback) {
         return;
@@ -1861,6 +1879,7 @@ static void ApplyNetPads(unsigned long tick) {
         if (sNumMachines > 2) {
             ApplyRetired(p, (long) tick, &pad);
         }
+        TestFinish(p);
         gControllerPads[p].button = pad.buttons;
         gControllerPads[p].stick_x = pad.stick_x;
         gControllerPads[p].stick_y = pad.stick_y;
@@ -2715,6 +2734,32 @@ void KartNet_EndFrame(void) {
         gKartNetHoldFrame = 0; /* no game tick ran this frame */
         gKartNetSkipFrame = 0;
         return;
+    }
+    {
+        /* the race start, against the sound: the countdown (game ticks) and the audio the game made by then
+         * (owner, 2026-11-24: Lakitu's countdown starts too early for the music) */
+        extern unsigned long long gAudioFramesMade;
+        extern uint32_t GameEngine_GetSampleRate(void);
+        static int lastRaceState = -1;
+        static unsigned long setupTick;
+        static unsigned long long setupAudio;
+        static unsigned long long setupUs;
+        if (gGamestate == RACING && gRaceState != lastRaceState && !gRollbackResim) {
+            const unsigned long long nowUs = (unsigned long long) SDL_GetTicks64() * 1000ull;
+            if (gRaceState == RACE_SETUP || lastRaceState < 0) {
+                setupTick = sTick;
+                setupAudio = gAudioFramesMade;
+                setupUs = nowUs;
+            }
+            Log("race state %d at tick %lu: %lu ticks (%.2f s of game time), %.2f s of audio made, %.2f s of clock since "
+                "the setup",
+                (int) gRaceState, sTick, sTick - setupTick, (sTick - setupTick) / 30.0,
+                (gAudioFramesMade - setupAudio) / (double) GameEngine_GetSampleRate(), (nowUs - setupUs) / 1e6);
+            lastRaceState = gRaceState;
+        }
+        if (gGamestate != RACING) {
+            lastRaceState = -1;
+        }
     }
     if (sPlayback) {
         RecordTickHash(sTick);

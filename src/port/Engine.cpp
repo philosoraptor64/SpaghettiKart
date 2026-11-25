@@ -552,6 +552,7 @@ void (*gPortHostAudioWrite)(const int16_t* stereo, uint32_t frames, uint32_t rat
 uint32_t (*gPortHostAudioBuffered)(uint32_t rate) = nullptr;
 }
 
+extern "C" unsigned long long gAudioFramesMade = 0; /* audio frames the game made (KartNet's race-start log) */
 static int32_t AudioOutBuffered() {
     if (gPortHostAudioWrite != nullptr && gPortHostAudioBuffered != nullptr) {
         return (int32_t) gPortHostAudioBuffered(GameEngine_GetSampleRate());
@@ -616,6 +617,7 @@ void GameEngine::RenderAudioFrame() {
         for (size_t i = 0; i < NUM_AUDIO_CHANNELS; i++) {
             create_next_audio_buffer(nas_buffer + i * (num_audio_samples * 2), num_audio_samples);
         }
+        gAudioFramesMade += (unsigned long long) num_audio_samples * NUM_AUDIO_CHANNELS;
 
         GameEngine::Instance->gHMAS->CreateBuffer((u8*)hmas_buffer, 4 * num_audio_samples * sizeof(float));
 
