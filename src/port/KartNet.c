@@ -3107,6 +3107,12 @@ void KartNet_RenderLocalView(void* splitStart) {
     D_8016557A = lod[3];
     D_80165580 = lod[4];
     {
+        /* What the track drawing worked out goes back to the player's own screen: which section of the track to draw
+         * (pathCounter, kept from the last frame while the camera is in the air) and the facing. The split screen
+         * isn't drawn in this view, so nothing else updates them: in the air (a shell hit bounces the kart up) the
+         * draw fell back to the section from the race start and the scenery vanished (owner, 2026-11-24). */
+        local->pathCounter = view->pathCounter;
+        local->playerDirection = view->playerDirection;
         Vp fullViewport = view->viewport; /* read by the GPU later */
         *view = savedView;
         view->viewport = fullViewport;
