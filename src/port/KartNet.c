@@ -1805,14 +1805,31 @@ static void TestFinish(int p) {
      * done, as the game's own debug lap skip does, so the race ends and the results screens and menus run without
      * anyone driving. Game state, so a re-simulation does the same. */
     extern s32 gLapCountByPlayerId[];
-    static long testFinishAt = -2;
-    if (testFinishAt == -2) {
-        testFinishAt = EnvInt("MK64_NET_TEST_FINISH_AT", -1);
+    static long testFinishAt[4] = { -2, -2, -2, -2 };
+    if (testFinishAt[0] == -2) {
+        /* "20" = everyone at 20 s; "20,60" = player 1 at 20 s, player 2 at 60 s (and so on) */
+        const char* v = getenv("MK64_NET_TEST_FINISH_AT");
+        long last = -1;
+        for (int i = 0; i < 4; i++) {
+            if (v && *v) {
+                last = strtol(v, (char**) &v, 10);
+                if (*v == ',') {
+                    v++;
+                }
+            }
+            testFinishAt[i] = last;
+        }
     }
-    if (testFinishAt >= 0 && gGamestate == RACING && gModeSelection != BATTLE && gRaceState == RACE_IN_PROGRESS &&
-        gCourseTimer >= (f32) testFinishAt) {
+    if (p >= 0 && p < 4 && testFinishAt[p] >= 0 && gGamestate == RACING && gModeSelection != BATTLE &&
+        (gRaceState == RACE_IN_PROGRESS || gRaceState == RACE_CALCULATE_RANKS) && gCourseTimer >= (f32) testFinishAt[p]) {
         if ((gPlayers[p].type & PLAYER_EXISTS) && (gPlayers[p].type & PLAYER_HUMAN) && gLapCountByPlayerId[p] < 3) {
             gLapCountByPlayerId[p] = 3;
+            /* MK64_NET_TEST_TOP4=1: as if they finished in the top 4 (the grand prix's results path, not RETRY/QUIT;
+             * the test karts never move, so they'd finish last) */
+            extern s32 D_80150120;
+            if (getenv("MK64_NET_TEST_TOP4")) {
+                D_80150120 = 1;
+            }
         }
     }
 }
@@ -2760,6 +2777,13 @@ void KartNet_EndFrame(void) {
         if (gGamestate != RACING) {
             lastRaceState = -1;
         }
+        /* the end-of-race screens' step (race_logic.c func_8028E438 / func_8028E678) */
+        extern u16 D_8015F894;
+        static int lastEndStep = -1;
+        if (gGamestate == RACING && D_8015F894 != lastEndStep && !gRollbackResim) {
+            Log("end-of-race step %d at tick %lu (screen mode %d)", (int) D_8015F894, sTick, (int) gActiveScreenMode);
+            lastEndStep = D_8015F894;
+        }
     }
     if (sPlayback) {
         RecordTickHash(sTick);
@@ -3066,11 +3090,21 @@ void KartNet_RenderLocalView(void* splitStart) {
     ScreenContext savedView = *view;
     f32 aspect = gScreenAspect;
     *view = *local;
-    view->screenWidth = SCREEN_WIDTH;
-    view->screenHeight = SCREEN_HEIGHT;
-    view->screenStartX = SCREEN_WIDTH / 2;
-    view->screenStartY = SCREEN_HEIGHT / 2;
-    gScreenAspect = (f32) SCREEN_WIDTH / (f32) SCREEN_HEIGHT;
+    /* After a grand prix race the game shrinks the race views into corners to make room for the results and the
+     * standings (race_logic.c func_8028E678, steps 6/5 -> 3): keep the local view at the game's own place and size
+     * then, so the tables aren't drawn over a full-screen race. Otherwise: the whole screen. */
+    extern u16 D_8015F894;
+    const int resultsLayout = gModeSelection == GRAND_PRIX && gRaceState >= RACE_FINISHED &&
+                              (D_8015F894 == 3 || D_8015F894 == 4 || D_8015F894 == 5 || D_8015F894 == 6);
+    if (!resultsLayout) {
+        view->screenWidth = SCREEN_WIDTH;
+        view->screenHeight = SCREEN_HEIGHT;
+        view->screenStartX = SCREEN_WIDTH / 2;
+        view->screenStartY = SCREEN_HEIGHT / 2;
+        gScreenAspect = (f32) SCREEN_WIDTH / (f32) SCREEN_HEIGHT;
+    } else {
+        gScreenAspect = (f32) view->screenWidth / (f32) view->screenHeight;
+    }
     /* Kart level-of-detail / shadow / particle distances: use the 1-player
      * values (spawn_players.c func_80039AE4); 2-player ones are shorter. */
     s16 lod[5] = { D_80165570, D_80165574, D_80165578, D_8016557A, D_80165580 };
@@ -3090,6 +3124,14 @@ void KartNet_RenderLocalView(void* splitStart) {
         D_8018E810[i] = D_8018E810[4];
     }
     sDrawingLocalView = 1;
+    /* The view is the frame's last (and only) screen: the game draws its full-screen menus (the grand prix's results
+     * and standings, the course name at the start...) with the last split screen (func_80093A5C: gNumScreens != 0).
+     * With the split screens left out, gNumScreens was still 0 here, so those menus were never drawn (owner,
+     * 2026-11-24: no menu after a 2-player grand prix race; Start went straight to the next race). */
+    if (gNumScreens == 0) {
+        func_8009C918();   /* what the first screen of a frame does first */
+        gNumScreens = 1;
+    }
     if (sLocalPlayer == 0) {
         render_screens(view, RENDER_SCREEN_MODE_2P_VERTICAL_PLAYER_ONE, 1, 0);
     } else {
