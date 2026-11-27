@@ -146,6 +146,18 @@ static long sTickHashTick[RB_HASHES];
 static long sLastRecorded = -1;
 static unsigned long sRbCount = 0, sRbFrames = 0, sRbMaxDepth = 0, sHolds = 0;
 static int sDesyncLogged = 0;
+/* resync after a desync (n64net_resync_*, MK64_NET_NO_RESYNC=1: off): the host's state comes over with pointers
+ * translated (Rollback_Resync*, n64net_reloc.h) */
+static int sResyncOn = 0, sResyncFailed = 0, sResyncLoaded = 0;
+static uint32_t sResyncsDone = 0;
+static void CbResyncSave(void* user, uint8_t* out) {
+    (void) user;
+    Rollback_ResyncSave(out);
+}
+static void CbResyncLoad(void* user, const uint8_t* in) {
+    (void) user;
+    sResyncLoaded = Rollback_ResyncLoad(in);
+}
 
 /* Session mode (MK64_NET_SESSION=1): both games run as one console from the
  * start-up wait on: the intro, the title screen, the game's own menus (host's
@@ -2032,6 +2044,54 @@ static void RbAdvance(void* user) {
     sSimTick++;
 }
 
+/* the rollback driver at this tick (saves its state; replays a rollback that came in) */
+static void RollbackFrameHere(void) {
+    sSimTick = sTick;
+    n64net_rollback_callbacks cb = { RbSave, RbLoad, RbAdvance, NULL, RB_SLOTS };
+    Rollback_KeepDrawingState();
+    int depth = n64net_rollback_frame(sNet, (uint32_t) sTick, &cb);
+    if (depth > 0) {
+        Rollback_RestoreDrawingState();
+        sRbCount++;
+        sRbFrames += (unsigned long) depth;
+    }
+}
+
+/* Before tick sTick runs: every machine holds at the host's tick while the host's state comes over
+ * (n64net_resync_hold). A rollback that comes in meanwhile is replayed first. */
+static void ResyncPoint(void) {
+    double start = 0;
+    uint32_t tmp;
+    if (!sResyncOn || !sNet || sState != NET_RUNNING) {
+        return;
+    }
+    sResyncLoaded = 0;
+    while (n64net_resync_hold(sNet, (uint32_t) sTick)) {
+        if (!start) {
+            start = NowMs();
+            Log("tick %lu: holding for the resync", sTick);
+        }
+        usleep(300);
+        Poll();
+        n64net_input_resend(sNet);
+        if (sRbActive && n64net_peek_rollback(sNet, &tmp)) {
+            RollbackFrameHere();
+            continue;
+        }
+        if (HostPeerGone()) {
+            return;
+        }
+    }
+    if (start) {
+        sStallMs += NowMs() - start;
+        Log("tick %lu: resync hold over after %.2f s%s", sTick, (NowMs() - start) / 1000.0,
+            sResyncLoaded ? " (the host's state is loaded)" : "");
+        if (sResyncLoaded && sRbActive) {
+            RollbackFrameHere(); /* saves the loaded state (the driver dropped the old timeline's) */
+        }
+    }
+}
+
 /* Hashes of states whose inputs are all confirmed go to the peer. */
 static void RecordConfirmedHashes(void) {
     uint32_t c = n64net_input_confirmed_tick(sNet);
@@ -2065,12 +2125,25 @@ static void RecordConfirmedHashes(void) {
     uint8_t kind;
     if (!sDesyncLogged && n64net_sync_desynced(sNet, &dt, &kind)) {
         sDesyncLogged = 1;
-        Log("DESYNC tick %u (%s)", dt, sRollback ? "rollback" : "lockstep");
-        SetEnd("The two games got out of step, so the match was stopped. (Both logs have the details.)");
+        Log("DESYNC tick %u (%s)%s", dt, sRollback ? "rollback" : "lockstep",
+            sResyncOn ? ": getting back in step (resync)" : "");
         WriteDesyncDetail(dt);
         if (sRec) {
             fprintf(sRec, "# desync at tick %u\n", dt);
             fflush(sRec);
+        }
+    }
+    {
+        uint32_t done = 0;
+        const int rs = sResyncOn ? n64net_resync_status(sNet, NULL, &done) : (sDesyncLogged ? 2 : 0);
+        if (rs == 2 && sDesyncLogged && !sResyncFailed) {
+            sResyncFailed = 1;
+            SetEnd("The two games got out of step, so the match was stopped. (Both logs have the details.)");
+        }
+        if (done != sResyncsDone) { /* back in step: a later desync is logged (and resynced) again */
+            sResyncsDone = done;
+            sDesyncLogged = 0;
+            Log("back in step (resync %u)", done);
         }
     }
 }
@@ -2100,6 +2173,12 @@ static void NetFrame(const NetPad* pads) {
         /* Automatic delay (n64net): the host's DELAY is the floor; with
          * rollback keep the ceiling low, since rollback hides the rest. */
         n64net_input_set_auto_delay(sNet, (uint32_t) sDelay, sAdaptive ? (uint32_t) sMaxDelay : 0);
+        sResyncOn = sResyncFailed = 0;
+        sResyncsDone = 0;
+        if (sNet && !getenv("MK64_NET_NO_RESYNC") && Rollback_ResyncSize()) {
+            sResyncOn = 1;
+            n64net_resync_enable(sNet, sIsHost, (uint32_t) Rollback_ResyncSize(), CbResyncSave, CbResyncLoad, NULL);
+        }
         for (int i = 0; i < RB_HASHES; i++) {
             sTickHashTick[i] = -1;
         }
@@ -2220,6 +2299,7 @@ static void NetFrame(const NetPad* pads) {
         sStallMs += NowMs() - start;
     }
     if (!sRbActive) {
+        ResyncPoint();
         ApplyNetPads(sTick);
         return;
     }
@@ -2269,6 +2349,7 @@ static void NetFrame(const NetPad* pads) {
     } else if (depth < 0) {
         Log("rollback deeper than the snapshot ring at tick %lu", sTick);
     }
+    ResyncPoint();
     ApplyNetPads(sTick);
 }
 
@@ -2810,6 +2891,21 @@ void KartNet_EndFrame(void) {
         }
     }
     if (sNet) {
+        if (sIsHost && sResyncOn) { /* tests: a deliberate desync, or a resync of states in step */
+            static long desyncAt = -2, resyncAt = -2;
+            if (desyncAt == -2) {
+                desyncAt = EnvInt("MK64_NET_TEST_DESYNC", -1);
+                resyncAt = EnvInt("MK64_NET_TEST_RESYNC", -1);
+            }
+            if ((long) sTick == desyncAt) {
+                gRandomSeed16 ^= 0x1234;
+                Log("test desync injected at tick %lu", sTick);
+            }
+            if ((long) sTick == resyncAt) {
+                n64net_resync_request(sNet);
+                Log("test resync requested at tick %lu", sTick);
+            }
+        }
         RecordTickHash(sTick);
         RecordConfirmedHashes();
         if (sTick % (HASH_EVERY * 10) == 0 && sTick > 0) {

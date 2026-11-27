@@ -476,6 +476,9 @@ int SimHeap_BlockOf(const void* p, void** payload, size_t* size) {
 void* SimHeap_Base(void) {
     return sBase;
 }
+size_t SimHeap_Capacity(void) {
+    return sBase ? kReserve : 0;
+}
 size_t SimHeap_Used(void) {
     return sBase ? H()->cursor : 0;
 }

@@ -28,6 +28,7 @@
 #include <cstring>
 #include <vector>
 #include <chrono>
+#include <unistd.h>
 
 #if defined(__APPLE__)
 #include <mach-o/getsect.h>
@@ -35,6 +36,7 @@
 extern "C" const struct mach_header_64 __dso_handle; /* this image (the app, or the i64 module dylib) */
 #include <mach-o/dyld.h>
 #include <dlfcn.h>
+#include "n64net_reloc.h"
 #endif
 
 extern "C" {
@@ -723,6 +725,141 @@ void Rollback_SyncTestEndFrame(void) {
 /* Re-entry (i64 module / soak): free the snapshot slots, the SyncTest ring and
  * the kept drawing state before the globals are reset (their containers would
  * be forgotten with their memory still allocated). */
+/* ---- Resync: the same parts as a snapshot, in a form another device can load ---- */
+#if defined(__APPLE__)
+namespace {
+/* room per part (the same on every device); Luigi Raceway uses 125 KB of pool and 66 KB of sim heap (the log
+ * says how much each time) */
+constexpr size_t kResyncPoolCap = (size_t) 8 << 20, kResyncHeapCap = (size_t) 8 << 20;
+constexpr int kResyncCursors = 32;
+struct MenuBlob {   /* MenuCups as plain bytes */
+    uint64_t cupIndex;
+    int64_t currentCup;
+    uint32_t ncursors, valid;
+    uint64_t cursors[kResyncCursors];
+    char track[256], selected[256];
+};
+MenuBlob sMenuBlob;
+n64net_reloc sReloc;
+int sRelocReady = 0;
+/* the root slots: always the same count (the sky's is empty without a sky) */
+constexpr int kRootSlots = 9;
+std::vector<uint8_t> sNoRoot(sizeof(std::vector<std::unique_ptr<SkyActor>>), 0);
+
+int ResyncSpans(n64net_reloc_span* s) {
+    FindSections();
+    if (!sSupported) {
+        return 0;
+    }
+    /* regions: the image, and the sim heap once it is on (the same reservation size on every device, wherever it
+     * lies); set up each time (cheap) since the sim heap comes and goes with races */
+    n64net_reloc_free(&sReloc);
+    sRelocReady = n64net_reloc_init(&sReloc, &__dso_handle) ? 1 : -1;
+    if (sRelocReady < 0) {
+        return 0;
+    }
+    if (SimHeap_Base()) {
+        n64net_reloc_add(&sReloc, SimHeap_Base(), SimHeap_Capacity());
+    }
+    int n = 0;
+    s[n++] = { sData.base, sData.size, sData.size };
+    s[n++] = { sBss.base, sBss.size, sBss.size };
+    s[n++] = { (void*) PoolStart(), (size_t) (gNextFreeMemoryAddress - PoolStart()), kResyncPoolCap };
+    s[n++] = { SimHeap_Base() ? SimHeap_Base() : (void*) sNoRoot.data(), SimHeap_Used(), kResyncHeapCap };
+    std::vector<Root> roots = SimHeap_Base() ? Roots() : std::vector<Root>();
+    for (int i = 0; i < kRootSlots; i++) {
+        if (i < (int) roots.size()) {
+            s[n++] = { roots[(size_t) i].p, roots[(size_t) i].n, roots[(size_t) i].n };
+        } else {
+            s[n++] = { sNoRoot.data(), 0, sNoRoot.size() };
+        }
+    }
+    s[n++] = { &sMenuBlob, sizeof(sMenuBlob), sizeof(sMenuBlob) };
+    return n;
+}
+} // namespace
+
+extern "C" size_t Rollback_ResyncSize(void) {
+    n64net_reloc_span s[N64NET_RELOC_MAX_SPANS];
+    const int n = ResyncSpans(s);
+    return n ? n64net_reloc_state_size(s, n) : 0;
+}
+
+extern "C" int Rollback_ResyncSave(unsigned char* out) {
+    n64net_reloc_span s[N64NET_RELOC_MAX_SPANS];
+    n64net_reloc_stats st;
+    double t0 = NowMs();
+    int scope = SimHeap_Suspend();
+    memset(&sMenuBlob, 0, sizeof(sMenuBlob));
+    if (gGamestate != RACING) {
+        MenuCups m;
+        SaveMenuCups(m);
+        sMenuBlob.valid = 1;
+        sMenuBlob.cupIndex = m.cupIndex;
+        sMenuBlob.currentCup = m.currentCup;
+        sMenuBlob.ncursors = (uint32_t) std::min(m.cursors.size(), (size_t) kResyncCursors);
+        for (uint32_t i = 0; i < sMenuBlob.ncursors; i++) sMenuBlob.cursors[i] = m.cursors[i];
+        snprintf(sMenuBlob.track, sizeof(sMenuBlob.track), "%s", m.track.c_str());
+        snprintf(sMenuBlob.selected, sizeof(sMenuBlob.selected), "%s", m.selected.c_str());
+    }
+    const int n = ResyncSpans(s);
+    int ok = 0;
+    if (n) {
+        n64net_reloc_scan(&sReloc);
+        ok = n64net_reloc_save(&sReloc, s, n, out, &st);
+        LogLine("resync state: pool %zu KB, sim heap %zu KB, %llu words in the image or sim heap, %llu elsewhere "
+                "in memory, %.1f ms%s", s[2].used / 1024, s[3].used / 1024, (unsigned long long) st.region_ptrs,
+                (unsigned long long) st.foreign, NowMs() - t0, ok ? "" : " -- TOO BIG for its room: not usable");
+        if (getenv("MK64_NET_RELOC_DUMP")) {   /* test: <dir>/mk-resync-<pid>.bin, to compare two devices */
+            char path[1024];
+            snprintf(path, sizeof(path), "%s/mk-resync-%d.bin", getenv("MK64_NET_RELOC_DUMP"), (int) getpid());
+            if (FILE* f = fopen(path, "wb")) {
+                fwrite(out, 1, n64net_reloc_state_size(s, n), f);
+                fclose(f);
+            }
+        }
+    }
+    SimHeap_Resume(scope);
+    return ok;
+}
+
+extern "C" int Rollback_ResyncLoad(const unsigned char* in) {
+    n64net_reloc_span s[N64NET_RELOC_MAX_SPANS];
+    n64net_reloc_stats st;
+    const int n = ResyncSpans(s);
+    if (!n) {
+        return 0;
+    }
+    Rollback_KeepDrawingState();   /* this device's own drawing state stays (as after a rollback) */
+    n64net_reloc_scan(&sReloc);
+    const int ok = n64net_reloc_load(&sReloc, s, n, in, nullptr, &st);
+    LogLine("resync load %s: %llu words kept, %llu translated, %llu own pointers, %llu matched, %llu guessed",
+            ok ? "done" : "REFUSED", (unsigned long long) st.same, (unsigned long long) st.translated,
+            (unsigned long long) st.own_pointer, (unsigned long long) st.matched, (unsigned long long) st.guessed);
+    if (!ok) {
+        return 0;
+    }
+    Rollback_RestoreDrawingState();
+    if (gGamestate != RACING && sMenuBlob.valid && sMenuBlob.currentCup >= 0) {   /* (gGamestate: just loaded) */
+        MenuCups m;
+        m.cupIndex = (size_t) sMenuBlob.cupIndex;
+        m.currentCup = (long) sMenuBlob.currentCup;
+        for (uint32_t i = 0; i < sMenuBlob.ncursors && i < (uint32_t) kResyncCursors; i++) m.cursors.push_back(sMenuBlob.cursors[i]);
+        sMenuBlob.track[sizeof(sMenuBlob.track) - 1] = sMenuBlob.selected[sizeof(sMenuBlob.selected) - 1] = 0;
+        m.track = sMenuBlob.track;
+        m.selected = sMenuBlob.selected;
+        int scope = SimHeap_Suspend();
+        LoadMenuCups(m);
+        SimHeap_Resume(scope);
+    }
+    return 1;
+}
+#else
+extern "C" size_t Rollback_ResyncSize(void) { return 0; }
+extern "C" int Rollback_ResyncSave(unsigned char*) { return 0; }
+extern "C" int Rollback_ResyncLoad(const unsigned char*) { return 0; }
+#endif
+
 extern "C" void Rollback_ReleaseForReentry(void) {
     std::vector<Snapshot>().swap(sSlots);
     std::vector<Frame>().swap(sRing);
