@@ -758,6 +758,9 @@ int ResyncSpans(n64net_reloc_span* s) {
     if (sRelocReady < 0) {
         return 0;
     }
+    /* i64's game memory arena: at one fixed address on every device (pointers into it mean the same there); the
+     * sim heap inside it comes after, so it is checked first */
+    n64net_reloc_add(&sReloc, (const void*) (uintptr_t) 0x110000000ULL, (size_t) (576ULL << 20));
     if (SimHeap_Base()) {
         n64net_reloc_add(&sReloc, SimHeap_Base(), SimHeap_Capacity());
     }
