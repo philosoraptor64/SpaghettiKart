@@ -194,7 +194,10 @@ if(APPLE AND CMAKE_C_COMPILER_ID MATCHES "Clang")
   target_compile_options(${PROJECT_NAME} PRIVATE
     $<$<COMPILE_LANGUAGE:C>:-fno-common>
     $<$<COMPILE_LANGUAGE:C>:-include>
-    "$<$<COMPILE_LANGUAGE:C>:${CMAKE_CURRENT_SOURCE_DIR}/src/port/SnapshotSection.h>")
+    "$<$<COMPILE_LANGUAGE:C>:${CMAKE_CURRENT_SOURCE_DIR}/src/port/SnapshotSection.h>"
+    # zeroed locals (C and the C++ world objects): struct padding copied from the stack can hold per-device bytes
+    # that look like addresses, and a resync's address translation would move them (Perfect Dark, 2026-11-28)
+    -ftrivial-auto-var-init=zero)
   file(GLOB MK_SNAPSHOT_EXCLUDED "src/audio/*.c" "src/buffers/audio_heap.c")
   list(APPEND MK_SNAPSHOT_EXCLUDED src/port/KartNet.c src/port/ReplayCheck.c src/profiler.c)
   set_source_files_properties(${MK_SNAPSHOT_EXCLUDED} PROPERTIES COMPILE_DEFINITIONS MK_SNAPSHOT_EXCLUDE=1)

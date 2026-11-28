@@ -758,6 +758,7 @@ int ResyncSpans(n64net_reloc_span* s) {
     if (sRelocReady < 0) {
         return 0;
     }
+    sReloc.align4 = 2;   /* pointers 2, 4 or 6 bytes into a word (packed structs) too, listed after the spans */
     /* i64's game memory arena: at one fixed address on every device (pointers into it mean the same there); the
      * sim heap inside it comes after, so it is checked first */
     n64net_reloc_add(&sReloc, (const void*) (uintptr_t) 0x110000000ULL, (size_t) (576ULL << 20));
@@ -785,7 +786,7 @@ int ResyncSpans(n64net_reloc_span* s) {
 extern "C" size_t Rollback_ResyncSize(void) {
     n64net_reloc_span s[N64NET_RELOC_MAX_SPANS];
     const int n = ResyncSpans(s);
-    return n ? n64net_reloc_state_size(s, n) : 0;
+    return n ? n64net_reloc_state_size_r(&sReloc, s, n) : 0;
 }
 
 extern "C" int Rollback_ResyncSave(unsigned char* out) {
@@ -811,13 +812,13 @@ extern "C" int Rollback_ResyncSave(unsigned char* out) {
         n64net_reloc_scan(&sReloc);
         ok = n64net_reloc_save(&sReloc, s, n, out, &st);
         LogLine("resync state: pool %zu KB, sim heap %zu KB, %llu words in the image or sim heap, %llu elsewhere "
-                "in memory, %.1f ms%s", s[2].used / 1024, s[3].used / 1024, (unsigned long long) st.region_ptrs,
-                (unsigned long long) st.foreign, NowMs() - t0, ok ? "" : " -- TOO BIG for its room: not usable");
+                "in memory, %llu split, %.1f ms%s", s[2].used / 1024, s[3].used / 1024, (unsigned long long) st.region_ptrs,
+                (unsigned long long) st.foreign, (unsigned long long) st.split, NowMs() - t0, ok ? "" : " -- TOO BIG for its room: not usable");
         if (getenv("MK64_NET_RELOC_DUMP")) {   /* test: <dir>/mk-resync-<pid>.bin, to compare two devices */
             char path[1024];
             snprintf(path, sizeof(path), "%s/mk-resync-%d.bin", getenv("MK64_NET_RELOC_DUMP"), (int) getpid());
             if (FILE* f = fopen(path, "wb")) {
-                fwrite(out, 1, n64net_reloc_state_size(s, n), f);
+                fwrite(out, 1, n64net_reloc_state_size_r(&sReloc, s, n), f);
                 fclose(f);
             }
         }
@@ -834,11 +835,13 @@ extern "C" int Rollback_ResyncLoad(const unsigned char* in) {
         return 0;
     }
     Rollback_KeepDrawingState();   /* this device's own drawing state stays (as after a rollback) */
+    const double t0 = NowMs();
     n64net_reloc_scan(&sReloc);
     const int ok = n64net_reloc_load(&sReloc, s, n, in, nullptr, &st);
-    LogLine("resync load %s: %llu words kept, %llu translated, %llu own pointers, %llu matched, %llu guessed",
-            ok ? "done" : "REFUSED", (unsigned long long) st.same, (unsigned long long) st.translated,
-            (unsigned long long) st.own_pointer, (unsigned long long) st.matched, (unsigned long long) st.guessed);
+    LogLine("resync load %s: %llu words kept, %llu translated, %llu own pointers, %llu matched, %llu guessed, "
+            "%.1f ms", ok ? "done" : "REFUSED", (unsigned long long) st.same, (unsigned long long) st.translated,
+            (unsigned long long) st.own_pointer, (unsigned long long) st.matched, (unsigned long long) st.guessed,
+            NowMs() - t0);
     if (!ok) {
         return 0;
     }
