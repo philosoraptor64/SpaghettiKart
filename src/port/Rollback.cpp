@@ -746,24 +746,31 @@ int sRelocReady = 0;
 constexpr int kRootSlots = 9;
 std::vector<uint8_t> sNoRoot(sizeof(std::vector<std::unique_ptr<SkyActor>>), 0);
 
+/* regions: the image, and the sim heap once it is on (the same reservation size on every device, wherever it
+ * lies); set up each time (cheap) since the sim heap comes and goes with races */
+bool ResyncRegions(n64net_reloc* r) {
+    n64net_reloc_free(r);
+    if (!n64net_reloc_init(r, &__dso_handle)) {
+        return false;
+    }
+    r->align4 = 2;   /* pointers 2, 4 or 6 bytes into a word (packed structs) too, listed after the spans */
+    /* i64's game memory arena: at one fixed address on every device (pointers into it mean the same there); the
+     * sim heap inside it comes after, so it is checked first */
+    n64net_reloc_add(r, (const void*) (uintptr_t) 0x110000000ULL, (size_t) (576ULL << 20));
+    if (SimHeap_Base()) {
+        n64net_reloc_add(r, SimHeap_Base(), SimHeap_Capacity());
+    }
+    return true;
+}
+
 int ResyncSpans(n64net_reloc_span* s) {
     FindSections();
     if (!sSupported) {
         return 0;
     }
-    /* regions: the image, and the sim heap once it is on (the same reservation size on every device, wherever it
-     * lies); set up each time (cheap) since the sim heap comes and goes with races */
-    n64net_reloc_free(&sReloc);
-    sRelocReady = n64net_reloc_init(&sReloc, &__dso_handle) ? 1 : -1;
+    sRelocReady = ResyncRegions(&sReloc) ? 1 : -1;
     if (sRelocReady < 0) {
         return 0;
-    }
-    sReloc.align4 = 2;   /* pointers 2, 4 or 6 bytes into a word (packed structs) too, listed after the spans */
-    /* i64's game memory arena: at one fixed address on every device (pointers into it mean the same there); the
-     * sim heap inside it comes after, so it is checked first */
-    n64net_reloc_add(&sReloc, (const void*) (uintptr_t) 0x110000000ULL, (size_t) (576ULL << 20));
-    if (SimHeap_Base()) {
-        n64net_reloc_add(&sReloc, SimHeap_Base(), SimHeap_Capacity());
     }
     int n = 0;
     s[n++] = { sData.base, sData.size, sData.size };
@@ -789,11 +796,44 @@ extern "C" size_t Rollback_ResyncSize(void) {
     return n ? n64net_reloc_state_size_r(&sReloc, s, n) : 0;
 }
 
-extern "C" int Rollback_ResyncSave(unsigned char* out) {
-    n64net_reloc_span s[N64NET_RELOC_MAX_SPANS];
-    n64net_reloc_stats st;
-    double t0 = NowMs();
+namespace {
+/* Live resync (n64net_resync_set_live): the state at the hold tick, copied (the used part of each span, 8-byte
+ * aligned) with the regions as they were then; Rollback_ResyncSave encodes the copy later, on n64net's worker
+ * thread, while the game goes on. */
+std::vector<uint8_t> sCapBytes;
+n64net_reloc_span sCapSpans[N64NET_RELOC_MAX_SPANS];
+int sCapN = 0;
+bool sCapValid = false;
+n64net_reloc sRelocEnc;
+void FillMenuBlob();
+} // namespace
+
+extern "C" void Rollback_ResyncCapture(void) {
+    const double t0 = NowMs();
     int scope = SimHeap_Suspend();
+    FillMenuBlob();
+    n64net_reloc_span s[N64NET_RELOC_MAX_SPANS];
+    const int n = ResyncSpans(s);
+    sCapValid = false;
+    if (n && ResyncRegions(&sRelocEnc)) {
+        size_t total = 0;
+        for (int i = 0; i < n; i++) total += (s[i].used + 7) & ~(size_t) 7;
+        sCapBytes.resize(total);
+        size_t at = 0;
+        for (int i = 0; i < n; i++) {
+            if (s[i].used) memcpy(sCapBytes.data() + at, s[i].base, s[i].used);
+            sCapSpans[i] = { sCapBytes.data() + at, s[i].used, s[i].cap };
+            at += (s[i].used + 7) & ~(size_t) 7;
+        }
+        sCapN = n;
+        sCapValid = true;
+        LogLine("resync: state captured (%zu KB), %.2f ms", total / 1024, NowMs() - t0);
+    }
+    SimHeap_Resume(scope);
+}
+
+namespace {
+void FillMenuBlob() {
     memset(&sMenuBlob, 0, sizeof(sMenuBlob));
     if (gGamestate != RACING) {
         MenuCups m;
@@ -806,6 +846,24 @@ extern "C" int Rollback_ResyncSave(unsigned char* out) {
         snprintf(sMenuBlob.track, sizeof(sMenuBlob.track), "%s", m.track.c_str());
         snprintf(sMenuBlob.selected, sizeof(sMenuBlob.selected), "%s", m.selected.c_str());
     }
+}
+} // namespace
+
+extern "C" int Rollback_ResyncSave(unsigned char* out) {
+    n64net_reloc_span s[N64NET_RELOC_MAX_SPANS];
+    n64net_reloc_stats st;
+    double t0 = NowMs();
+    if (sCapValid) {   /* live: the capture (n64net's worker thread; the game goes on) */
+        sCapValid = false;
+        n64net_reloc_scan(&sRelocEnc);
+        const int ok = n64net_reloc_save(&sRelocEnc, sCapSpans, sCapN, out, &st);
+        LogLine("resync state (captured): %llu words in the image or sim heap, %llu elsewhere in memory, %llu split, "
+                "%.1f ms (worker thread)%s", (unsigned long long) st.region_ptrs, (unsigned long long) st.foreign,
+                (unsigned long long) st.split, NowMs() - t0, ok ? "" : " -- TOO BIG for its room: not usable");
+        return ok;
+    }
+    int scope = SimHeap_Suspend();
+    FillMenuBlob();
     const int n = ResyncSpans(s);
     int ok = 0;
     if (n) {
@@ -836,7 +894,18 @@ extern "C" int Rollback_ResyncLoad(const unsigned char* in) {
     }
     Rollback_KeepDrawingState();   /* this device's own drawing state stays (as after a rollback) */
     const double t0 = NowMs();
-    n64net_reloc_scan(&sReloc);
+    if (sRelocEnc.num_vm > 0) {
+        /* live: the memory map the worker thread just scanned (scanning here took ~10 ms of a frame) */
+        if (sReloc.cap_vm < sRelocEnc.num_vm) {
+            free(sReloc.vm);
+            sReloc.vm = (n64net_reloc_range*) malloc(sizeof(n64net_reloc_range) * (size_t) sRelocEnc.num_vm);
+            sReloc.cap_vm = sReloc.vm ? sRelocEnc.num_vm : 0;
+        }
+        sReloc.num_vm = sReloc.vm ? sRelocEnc.num_vm : 0;
+        if (sReloc.vm) memcpy(sReloc.vm, sRelocEnc.vm, sizeof(n64net_reloc_range) * (size_t) sRelocEnc.num_vm);
+        sRelocEnc.num_vm = 0;   /* (once) */
+    }
+    if (sReloc.num_vm == 0) n64net_reloc_scan(&sReloc);
     const int ok = n64net_reloc_load(&sReloc, s, n, in, nullptr, &st);
     LogLine("resync load %s: %llu words kept, %llu translated, %llu own pointers, %llu matched, %llu guessed, "
             "%.1f ms", ok ? "done" : "REFUSED", (unsigned long long) st.same, (unsigned long long) st.translated,
@@ -863,6 +932,7 @@ extern "C" int Rollback_ResyncLoad(const unsigned char* in) {
 #else
 extern "C" size_t Rollback_ResyncSize(void) { return 0; }
 extern "C" int Rollback_ResyncSave(unsigned char*) { return 0; }
+extern "C" void Rollback_ResyncCapture(void) {}
 extern "C" int Rollback_ResyncLoad(const unsigned char*) { return 0; }
 #endif
 

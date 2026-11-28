@@ -154,9 +154,17 @@ static void CbResyncSave(void* user, uint8_t* out) {
     (void) user;
     Rollback_ResyncSave(out);
 }
+/* live resync (no hold, while rollback runs; MK64_NET_RESYNC_HOLD=1: always hold): the state at the hold tick */
+static int sResyncLive = 0;
+static void CbResyncCapture(void* user) {
+    (void) user;
+    Rollback_ResyncCapture();
+}
 static void CbResyncLoad(void* user, const uint8_t* in) {
     (void) user;
     sResyncLoaded = Rollback_ResyncLoad(in);
+    /* the state is of this tick now (live: the hold tick, the driver replays from there; RbLoad's job otherwise) */
+    sSimTick = n64net_rollback_callback_tick(sNet);
 }
 
 /* Session mode (MK64_NET_SESSION=1): both games run as one console from the
@@ -2178,6 +2186,7 @@ static void NetFrame(const NetPad* pads) {
         if (sNet && !getenv("MK64_NET_NO_RESYNC") && Rollback_ResyncSize()) {
             sResyncOn = 1;
             n64net_resync_enable(sNet, sIsHost, (uint32_t) Rollback_ResyncSize(), CbResyncSave, CbResyncLoad, NULL);
+            sResyncLive = !getenv("MK64_NET_RESYNC_HOLD");
         }
         for (int i = 0; i < RB_HASHES; i++) {
             sTickHashTick[i] = -1;
@@ -2299,12 +2308,15 @@ static void NetFrame(const NetPad* pads) {
         sStallMs += NowMs() - start;
     }
     if (!sRbActive) {
+        if (sResyncOn) n64net_resync_set_live(sNet, NULL);   /* (lockstep: nothing to replay from: hold) */
         ResyncPoint();
         ApplyNetPads(sTick);
         return;
     }
 
     sSimTick = sTick;
+    /* rollback runs: a resync goes on in the background (the driver captures the hold tick and replays) */
+    if (sResyncOn) n64net_resync_set_live(sNet, sResyncLive ? CbResyncCapture : NULL);
     n64net_rollback_callbacks cb = { RbSave, RbLoad, RbAdvance, NULL, RB_SLOTS };
     Rollback_KeepDrawingState();
     int depth = n64net_rollback_frame(sNet, (uint32_t) sTick, &cb);
